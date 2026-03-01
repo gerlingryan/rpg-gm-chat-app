@@ -1,0 +1,38 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+model Campaign {
+  id         String      @id @default(cuid())
+  title      String
+  ruleset    String
+  createdAt  DateTime    @default(now())
+  updatedAt  DateTime    @updatedAt
+  characters Character[]
+  messages   Message[]
+}
+
+model Character {
+  id              String   @id @default(cuid())
+  campaignId      String
+  campaign        Campaign @relation(fields: [campaignId], references: [id])
+  name            String
+  role            String   // player, companion, npc
+  sheetJson       Json
+  memorySummary   String?
+  isMainCharacter Boolean  @default(false)
+}
+
+model Message {
+  id          String   @id @default(cuid())
+  campaignId  String
+  campaign    Campaign @relation(fields: [campaignId], references: [id])
+  speakerName String
+  role        String   // user, gm, companion
+  content     String
+  createdAt   DateTime @default(now())
+}

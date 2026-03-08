@@ -1,15 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
-import { prisma } from "@/lib/prisma";
 import { openai } from "@/lib/openai";
 
-type RouteContext = {
-  params: Promise<{
-    id: string;
-  }>;
-};
-
-export async function POST(req: NextRequest, context: RouteContext) {
-  const { id } = await context.params;
+export async function POST(req: NextRequest) {
   const body = await req.json();
   const physicalDescription =
     typeof body.physicalDescription === "string"
@@ -17,6 +9,15 @@ export async function POST(req: NextRequest, context: RouteContext) {
       : "";
   const characterName =
     typeof body.name === "string" ? body.name.trim() : "Character";
+  const ruleset =
+    typeof body.ruleset === "string" ? body.ruleset.trim() : "";
+
+  if (!ruleset) {
+    return NextResponse.json(
+      { error: "Ruleset is required." },
+      { status: 400 },
+    );
+  }
 
   if (!physicalDescription) {
     return NextResponse.json(
@@ -25,19 +26,11 @@ export async function POST(req: NextRequest, context: RouteContext) {
     );
   }
 
-  const campaign = await prisma.campaign.findUnique({
-    where: { id },
-  });
-
-  if (!campaign) {
-    return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
-  }
-
   const imageResponse = (await openai.images.generate({
     model: "gpt-image-1-mini",
     size: "1024x1024",
     prompt: [
-      `Create a character portrait for a ${campaign.ruleset} tabletop RPG.`,
+      `Create a character portrait for a ${ruleset} tabletop RPG.`,
       `Character name: ${characterName}.`,
       `Physical description: ${physicalDescription}.`,
       "Show a single character portrait from the chest up.",

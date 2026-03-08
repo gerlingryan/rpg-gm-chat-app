@@ -81,7 +81,7 @@ export async function POST(req: NextRequest, context: RouteContext) {
   }
 
   const imageResponse = (await openai.images.generate({
-    model: "gpt-image-1",
+    model: "gpt-image-1-mini",
     size: "1024x1024",
     prompt: [
       `Create a character portrait for a ${character.campaign.ruleset} tabletop RPG.`,

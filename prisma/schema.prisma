@@ -10,21 +10,44 @@ model Campaign {
   id         String      @id @default(cuid())
   title      String
   ruleset    String
+  chatModel  String      @default("gpt-4o-mini")
+  progressionStateJson Json?
+  progressionEventsJson Json?
+  partyStateJson Json?
+  mapStateJson Json?
+  worldMapJson Json?
+  worldMapHistoryJson Json?
+  sceneImageHistoryJson Json?
+  combatStateJson Json?
   createdAt  DateTime    @default(now())
   updatedAt  DateTime    @updatedAt
   characters Character[]
   messages   Message[]
 }
 
-model Character {
-  id              String   @id @default(cuid())
-  campaignId      String
-  campaign        Campaign @relation(fields: [campaignId], references: [id])
+model LibraryCharacter {
+  id              String      @id @default(cuid())
   name            String
-  role            String   // player, companion, npc
+  ruleset         String
+  role            String      @default("player")
   sheetJson       Json
   memorySummary   String?
-  isMainCharacter Boolean  @default(false)
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+  campaignCopies  Character[] @relation("CampaignCharacterOrigin")
+}
+
+model Character {
+  id                     String            @id @default(cuid())
+  campaignId             String
+  campaign               Campaign          @relation(fields: [campaignId], references: [id])
+  originLibraryCharacterId String?
+  originLibraryCharacter LibraryCharacter? @relation("CampaignCharacterOrigin", fields: [originLibraryCharacterId], references: [id])
+  name                   String
+  role                   String            // player, companion, npc
+  sheetJson              Json
+  memorySummary          String?
+  isMainCharacter        Boolean           @default(false)
 }
 
 model Message {

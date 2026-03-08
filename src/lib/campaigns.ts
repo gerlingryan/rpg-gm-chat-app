@@ -27,10 +27,48 @@ export type CharacterQuestion = {
   defaultValue?: string | number;
   options?: CharacterQuestionOption[];
   helpText?: string;
+  maxLength?: number;
   showWhen?: (
     answers: Record<string, string | number | null | undefined>,
   ) => boolean;
 };
+
+const CHARACTER_TEXTAREA_LIMITS: Record<string, number> = {
+  physicalDescription: 700,
+  personality: 1000,
+  background: 1800,
+};
+
+function getCharacterTextareaLimit(id: string) {
+  return CHARACTER_TEXTAREA_LIMITS[id];
+}
+
+function truncateTextToMaxLength(value: string, maxLength: number) {
+  if (value.length <= maxLength) {
+    return value;
+  }
+
+  return value.slice(0, maxLength).trimEnd();
+}
+
+export function sanitizeCharacterAnswersForLimits<
+  T extends Record<string, string | number | null | undefined>,
+>(answers: T): T {
+  const nextAnswers = {
+    ...answers,
+  } as T;
+
+  for (const [fieldId, maxLength] of Object.entries(CHARACTER_TEXTAREA_LIMITS)) {
+    const currentValue = nextAnswers[fieldId];
+    if (typeof currentValue !== "string") {
+      continue;
+    }
+
+    nextAnswers[fieldId] = truncateTextToMaxLength(currentValue, maxLength);
+  }
+
+  return nextAnswers;
+}
 
 const STARTER_TEMPLATES: Record<string, StarterTemplate> = {
   "d&d 5e": {
@@ -420,7 +458,16 @@ function createTextareaQuestion(
   label: string,
   defaultValue = "",
   helpText?: string,
+  maxLength?: number,
 ): CharacterQuestion {
+  const enforcedMaxLength = getCharacterTextareaLimit(id);
+  const resolvedMaxLength =
+    typeof maxLength === "number" && typeof enforcedMaxLength === "number"
+      ? Math.min(maxLength, enforcedMaxLength)
+      : typeof maxLength === "number"
+        ? maxLength
+        : enforcedMaxLength;
+
   return {
     id,
     label,
@@ -428,7 +475,21 @@ function createTextareaQuestion(
     required: false,
     defaultValue,
     helpText,
+    maxLength: resolvedMaxLength,
   };
+}
+
+function createGenderQuestion(): CharacterQuestion {
+  return createSelectQuestion("gender", "Gender", [
+    { value: "Male", label: "Male" },
+    { value: "Female", label: "Female" },
+    { value: "Trans", label: "Trans" },
+    { value: "Other", label: "Other" },
+  ]);
+}
+
+function createAgeQuestion(): CharacterQuestion {
+  return createNumberQuestion("age", "Age", 1, 999, 30);
 }
 
 export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] {
@@ -452,14 +513,17 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Wizard", label: "Wizard" },
       ]),
       createSelectQuestion("ancestry", "Ancestry", [
+        { value: "Aasimar", label: "Aasimar" },
         { value: "Dragonborn", label: "Dragonborn" },
         { value: "Dwarf", label: "Dwarf" },
         { value: "Elf", label: "Elf" },
         { value: "Gnome", label: "Gnome" },
+        { value: "Goliath", label: "Goliath" },
         { value: "Half-Elf", label: "Half-Elf" },
         { value: "Half-Orc", label: "Half-Orc" },
         { value: "Halfling", label: "Halfling" },
         { value: "Human", label: "Human" },
+        { value: "Orc", label: "Orc" },
         { value: "Tiefling", label: "Tiefling" },
       ]),
       createSelectQuestion("heritage", "Lineage / heritage", [
@@ -475,25 +539,55 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
       createNumberQuestion("int", "Intelligence", 8, 20, 10),
       createNumberQuestion("wis", "Wisdom", 8, 20, 10),
       createNumberQuestion("cha", "Charisma", 8, 20, 10),
-      createSelectQuestion("weapon", "Starting weapon", [
+      createSelectQuestion("mainHand", "Main-hand weapon", [
+        { value: "None", label: "None" },
         { value: "Battleaxe", label: "Battleaxe" },
+        { value: "Crossbow", label: "Crossbow" },
         { value: "Dagger", label: "Dagger" },
         { value: "Greataxe", label: "Greataxe" },
+        { value: "Greatsword", label: "Greatsword" },
         { value: "Longsword", label: "Longsword" },
         { value: "Longbow", label: "Longbow" },
         { value: "Mace", label: "Mace" },
-        { value: "Quarterstaff", label: "Quarterstaff" },
+        { value: "Maul", label: "Maul" },
         { value: "Rapier", label: "Rapier" },
+        { value: "Quarterstaff", label: "Quarterstaff" },
+        { value: "Scimitar", label: "Scimitar" },
+        { value: "Shortsword", label: "Shortsword" },
         { value: "Shortbow", label: "Shortbow" },
         { value: "Spear", label: "Spear" },
       ]),
+      createSelectQuestion("offHand", "Off-hand weapon", [
+        { value: "None", label: "None" },
+        { value: "Dagger", label: "Dagger" },
+        { value: "Handaxe", label: "Handaxe" },
+        { value: "Light Hammer", label: "Light Hammer" },
+        { value: "Scimitar", label: "Scimitar" },
+        { value: "Shortsword", label: "Shortsword" },
+        { value: "Rapier", label: "Rapier" },
+      ]),
+      createSelectQuestion("rangedWeapon", "Ranged weapon", [
+        { value: "None", label: "None" },
+        { value: "Crossbow", label: "Crossbow" },
+        { value: "Javelin", label: "Javelin" },
+        { value: "Longbow", label: "Longbow" },
+        { value: "Shortbow", label: "Shortbow" },
+        { value: "Sling", label: "Sling" },
+      ]),
       createSelectQuestion("armor", "Armor", [
         { value: "No Armor", label: "No Armor" },
-        { value: "Shield", label: "Shield and light armor" },
         { value: "Leather", label: "Leather" },
+        { value: "Studded Leather", label: "Studded Leather" },
         { value: "Chain Shirt", label: "Chain Shirt" },
         { value: "Scale Mail", label: "Scale Mail" },
+        { value: "Breastplate", label: "Breastplate" },
         { value: "Chain Mail", label: "Chain Mail" },
+        { value: "Half Plate", label: "Half Plate" },
+        { value: "Plate", label: "Plate" },
+      ]),
+      createSelectQuestion("shieldEquipped", "Shield", [
+        { value: "No", label: "No shield" },
+        { value: "Yes", label: "Shield equipped" },
       ]),
       createSelectQuestion("gearKit", "Adventuring kit", [
         { value: "Burglar's Pack", label: "Burglar's Pack" },
@@ -519,7 +613,10 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
       createSelectQuestion("clericDomain", "Divine domain", [
         { value: "Life", label: "Life" },
         { value: "Light", label: "Light" },
+        { value: "Knowledge", label: "Knowledge" },
+        { value: "Nature", label: "Nature" },
         { value: "Tempest", label: "Tempest" },
+        { value: "War", label: "War" },
         { value: "Trickery", label: "Trickery" },
       ]),
       createSelectQuestion("sorcerousOrigin", "Sorcerous origin", [
@@ -527,8 +624,8 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Wild Magic", label: "Wild Magic" },
       ]),
       createSelectQuestion("warlockPatron", "Otherworldly patron", [
-        { value: "The Fiend", label: "The Fiend" },
         { value: "The Archfey", label: "The Archfey" },
+        { value: "The Fiend", label: "The Fiend" },
         { value: "The Great Old One", label: "The Great Old One" },
       ]),
       createSelectQuestion("barbarianPath", "Primal path", [
@@ -550,6 +647,7 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
       ]),
       createSelectQuestion("monasticTradition", "Monastic tradition", [
         { value: "Open Hand", label: "Way of the Open Hand" },
+        { value: "Elements", label: "Way of the Four Elements" },
         { value: "Shadow", label: "Way of Shadow" },
       ]),
       createSelectQuestion("paladinOath", "Sacred oath", [
@@ -579,9 +677,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
       createSelectQuestion("spellLevel2A", "2nd-level spell 1", getDndSpellOptions("Wizard", 2)),
       createSelectQuestion("spellLevel2B", "2nd-level spell 2", getDndSpellOptions("Wizard", 2)),
       createSelectQuestion("spellLevel3A", "3rd-level spell 1", getDndSpellOptions("Wizard", 3)),
-      createTextareaQuestion("background", "Background"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "Background", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
     ];
 
     const classIs = (value: string) => (answers: Record<string, string | number | null | undefined>) =>
@@ -722,23 +822,244 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
   }
 
   if (normalizedRuleset === "deadlands classic") {
-    return [
+    const questions: CharacterQuestion[] = [
       createSelectQuestion("archetype", "Archetype", [
         { value: "Gunslinger", label: "Gunslinger" },
+        { value: "Gambler", label: "Gambler" },
+        { value: "Lawman", label: "Lawman" },
         { value: "Huckster", label: "Huckster" },
-        { value: "Blessed", label: "Blessed" },
         { value: "Mad Scientist", label: "Mad Scientist" },
+        { value: "Blessed", label: "Blessed" },
+        { value: "Shaman", label: "Shaman" },
+        { value: "Bounty Hunter", label: "Bounty Hunter" },
+        { value: "Scout / Tracker", label: "Scout / Tracker" },
+        { value: "Soldier / Cavalry", label: "Soldier / Cavalry" },
+        { value: "Prospector", label: "Prospector" },
+        { value: "Showman / Entertainer", label: "Showman / Entertainer" },
       ]),
-      createSelectQuestion("bestEdge", "Best edge", [
+      createNumberQuestion("deftness", "Deftness", 1, 5, 3),
+      createNumberQuestion("nimbleness", "Nimbleness", 1, 5, 3),
+      createNumberQuestion("quickness", "Quickness", 1, 5, 3),
+      createNumberQuestion("strength", "Strength", 1, 5, 3),
+      createNumberQuestion("vigor", "Vigor", 1, 5, 3),
+      createNumberQuestion("cognition", "Cognition", 1, 5, 3),
+      createNumberQuestion("knowledge", "Knowledge", 1, 5, 3),
+      createNumberQuestion("mien", "Mien", 1, 5, 3),
+      createNumberQuestion("smarts", "Smarts", 1, 5, 3),
+      createNumberQuestion("spirit", "Spirit", 1, 5, 3),
+      createSelectQuestion("primarySkill", "Primary skill", [
+        { value: "Shootin'", label: "Shootin'" },
+        { value: "Fightin'", label: "Fightin'" },
+        { value: "Dodge", label: "Dodge" },
+        { value: "Guts", label: "Guts" },
+        { value: "Scrutinize", label: "Scrutinize" },
+        { value: "Persuasion", label: "Persuasion" },
+        { value: "Ridicule", label: "Ridicule" },
+        { value: "Overawe", label: "Overawe" },
+        { value: "Faith", label: "Faith" },
+        { value: "Hexslingin'", label: "Hexslingin'" },
+        { value: "Mad Science", label: "Mad Science" },
+        { value: "Survival", label: "Survival" },
+        { value: "Tracking", label: "Tracking" },
+        { value: "Horse Ridin'", label: "Horse Ridin'" },
+        { value: "Sneak", label: "Sneak" },
+      ]),
+      createSelectQuestion("secondarySkill", "Secondary skill", [
+        { value: "Guts", label: "Guts" },
+        { value: "Dodge", label: "Dodge" },
+        { value: "Shootin'", label: "Shootin'" },
+        { value: "Fightin'", label: "Fightin'" },
+        { value: "Scrutinize", label: "Scrutinize" },
+        { value: "Persuasion", label: "Persuasion" },
+        { value: "Ridicule", label: "Ridicule" },
+        { value: "Overawe", label: "Overawe" },
+        { value: "Faith", label: "Faith" },
+        { value: "Hexslingin'", label: "Hexslingin'" },
+        { value: "Mad Science", label: "Mad Science" },
+        { value: "Survival", label: "Survival" },
+        { value: "Tracking", label: "Tracking" },
+        { value: "Horse Ridin'", label: "Horse Ridin'" },
+        { value: "Sneak", label: "Sneak" },
+      ]),
+      createSelectQuestion("edgeOne", "Edge 1", [
         { value: "Quick Draw", label: "Quick Draw" },
         { value: "Nerves o' Steel", label: "Nerves o' Steel" },
+        { value: "Keen", label: "Keen" },
+        { value: "Strong Willed", label: "Strong Willed" },
+        { value: "Hard to Kill", label: "Hard to Kill" },
+        { value: "Level Headed", label: "Level Headed" },
         { value: "Arcane Background", label: "Arcane Background" },
       ]),
-      createNumberQuestion("guts", "Grit / Guts", 1, 5, 2),
-      createTextareaQuestion("background", "Trouble trailing behind them"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
-      ];
+      createSelectQuestion("edgeTwo", "Edge 2", [
+        { value: "None", label: "None" },
+        { value: "Quick Draw", label: "Quick Draw" },
+        { value: "Nerves o' Steel", label: "Nerves o' Steel" },
+        { value: "Keen", label: "Keen" },
+        { value: "Strong Willed", label: "Strong Willed" },
+        { value: "Hard to Kill", label: "Hard to Kill" },
+        { value: "Level Headed", label: "Level Headed" },
+        { value: "Arcane Background", label: "Arcane Background" },
+      ]),
+      createSelectQuestion("hindranceOne", "Hindrance 1", [
+        { value: "Enemy", label: "Enemy" },
+        { value: "Greedy", label: "Greedy" },
+        { value: "Loyal", label: "Loyal" },
+        { value: "Mean as a Rattler", label: "Mean as a Rattler" },
+        { value: "Vengeful", label: "Vengeful" },
+        { value: "Wanted", label: "Wanted" },
+        { value: "Night Terrors", label: "Night Terrors" },
+      ]),
+      createSelectQuestion("hindranceTwo", "Hindrance 2", [
+        { value: "None", label: "None" },
+        { value: "Enemy", label: "Enemy" },
+        { value: "Greedy", label: "Greedy" },
+        { value: "Loyal", label: "Loyal" },
+        { value: "Mean as a Rattler", label: "Mean as a Rattler" },
+        { value: "Vengeful", label: "Vengeful" },
+        { value: "Wanted", label: "Wanted" },
+        { value: "Night Terrors", label: "Night Terrors" },
+      ]),
+      createSelectQuestion("blessedMiracleOne", "Miracle 1", [
+        { value: "Smite", label: "Smite" },
+        { value: "Protection", label: "Protection" },
+        { value: "Healing", label: "Healing" },
+        { value: "Blessed Luck", label: "Blessed Luck" },
+        { value: "Sanctify", label: "Sanctify" },
+      ]),
+      createSelectQuestion("blessedMiracleTwo", "Miracle 2", [
+        { value: "None", label: "None" },
+        { value: "Smite", label: "Smite" },
+        { value: "Protection", label: "Protection" },
+        { value: "Healing", label: "Healing" },
+        { value: "Blessed Luck", label: "Blessed Luck" },
+        { value: "Sanctify", label: "Sanctify" },
+      ]),
+      createSelectQuestion("hucksterHexOne", "Hex 1", [
+        { value: "Soul Blast", label: "Soul Blast" },
+        { value: "Phantom Fingers", label: "Phantom Fingers" },
+        { value: "Card Sharp", label: "Card Sharp" },
+        { value: "Shadow Man", label: "Shadow Man" },
+        { value: "Fortune", label: "Fortune" },
+      ]),
+      createSelectQuestion("hucksterHexTwo", "Hex 2", [
+        { value: "None", label: "None" },
+        { value: "Soul Blast", label: "Soul Blast" },
+        { value: "Phantom Fingers", label: "Phantom Fingers" },
+        { value: "Card Sharp", label: "Card Sharp" },
+        { value: "Shadow Man", label: "Shadow Man" },
+        { value: "Fortune", label: "Fortune" },
+      ]),
+      createSelectQuestion("shamanFavorOne", "Favor 1", [
+        { value: "Spirit Warrior", label: "Spirit Warrior" },
+        { value: "Medicine Ways", label: "Medicine Ways" },
+        { value: "Beast Friend", label: "Beast Friend" },
+        { value: "Storm Calling", label: "Storm Calling" },
+        { value: "Ghost Voice", label: "Ghost Voice" },
+      ]),
+      createSelectQuestion("shamanFavorTwo", "Favor 2", [
+        { value: "None", label: "None" },
+        { value: "Spirit Warrior", label: "Spirit Warrior" },
+        { value: "Medicine Ways", label: "Medicine Ways" },
+        { value: "Beast Friend", label: "Beast Friend" },
+        { value: "Storm Calling", label: "Storm Calling" },
+        { value: "Ghost Voice", label: "Ghost Voice" },
+      ]),
+      createSelectQuestion("madScienceInventionOne", "Invention 1", [
+        { value: "Electrostatic Projector", label: "Electrostatic Projector" },
+        { value: "Ghost-Rock Analyzer", label: "Ghost-Rock Analyzer" },
+        { value: "Aetheric Communicator", label: "Aetheric Communicator" },
+        { value: "Clockwork Assistant", label: "Clockwork Assistant" },
+        { value: "Flash Coil", label: "Flash Coil" },
+      ]),
+      createSelectQuestion("madScienceInventionTwo", "Invention 2", [
+        { value: "None", label: "None" },
+        { value: "Electrostatic Projector", label: "Electrostatic Projector" },
+        { value: "Ghost-Rock Analyzer", label: "Ghost-Rock Analyzer" },
+        { value: "Aetheric Communicator", label: "Aetheric Communicator" },
+        { value: "Clockwork Assistant", label: "Clockwork Assistant" },
+        { value: "Flash Coil", label: "Flash Coil" },
+      ]),
+      createNumberQuestion("arcanePool", "Arcane points / favor", 0, 10, 3),
+      createSelectQuestion("mainHand", "Main hand", [
+        { value: "Colt Peacemaker", label: "Colt Peacemaker" },
+        { value: "Schofield Revolver", label: "Schofield Revolver" },
+        { value: "Double-Action Army", label: "Double-Action Army" },
+        { value: "Bow Knife", label: "Bow Knife" },
+        { value: "Saber", label: "Saber" },
+        { value: "Tomahawk", label: "Tomahawk" },
+        { value: "Derringer", label: "Derringer" },
+      ]),
+      createSelectQuestion("offHand", "Off hand", [
+        { value: "None", label: "None" },
+        { value: "Derringer", label: "Derringer" },
+        { value: "Bow Knife", label: "Bow Knife" },
+        { value: "Tomahawk", label: "Tomahawk" },
+        { value: "Schofield Revolver", label: "Schofield Revolver" },
+      ]),
+      createSelectQuestion("longarm", "Longarm", [
+        { value: "None", label: "None" },
+        { value: "Winchester Rifle", label: "Winchester Rifle" },
+        { value: "Coach Gun", label: "Coach Gun" },
+        { value: "Hunting Rifle", label: "Hunting Rifle" },
+        { value: "Sawed-Off Shotgun", label: "Sawed-Off Shotgun" },
+      ]),
+      createNumberQuestion("guts", "Guts", 1, 5, 2),
+      createNumberQuestion("woundHead", "Head wounds", 0, 4, 0),
+      createNumberQuestion("woundGuts", "Guts wounds", 0, 4, 0),
+      createNumberQuestion("woundLeftArm", "Left arm wounds", 0, 4, 0),
+      createNumberQuestion("woundRightArm", "Right arm wounds", 0, 4, 0),
+      createNumberQuestion("woundLeftLeg", "Left leg wounds", 0, 4, 0),
+      createNumberQuestion("woundRightLeg", "Right leg wounds", 0, 4, 0),
+      createNumberQuestion("fateWhite", "Fate chips (White)", 0, 10, 2),
+      createNumberQuestion("fateRed", "Fate chips (Red)", 0, 10, 1),
+      createNumberQuestion("fateBlue", "Fate chips (Blue)", 0, 10, 0),
+      createNumberQuestion("fateLegend", "Fate chips (Legend)", 0, 10, 0),
+      createSelectQuestion("woundIgnore", "Wound ignore source", [
+        { value: "None", label: "None" },
+        { value: "Arcane Background", label: "Arcane Background" },
+        { value: "Nerves o' Steel", label: "Nerves o' Steel" },
+        { value: "Veteran Resolve", label: "Veteran Resolve" },
+      ]),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "Trouble trailing behind them", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
+    ];
+
+    const archetypeIs = (value: string) => (
+      answers: Record<string, string | number | null | undefined>,
+    ) => getAnswerString(answers, "archetype", "Gunslinger") === value;
+
+    return questions.map((question) => {
+      if (["blessedMiracleOne", "blessedMiracleTwo"].includes(question.id)) {
+        return { ...question, showWhen: archetypeIs("Blessed") };
+      }
+
+      if (["hucksterHexOne", "hucksterHexTwo"].includes(question.id)) {
+        return { ...question, showWhen: archetypeIs("Huckster") };
+      }
+
+      if (["shamanFavorOne", "shamanFavorTwo"].includes(question.id)) {
+        return { ...question, showWhen: archetypeIs("Shaman") };
+      }
+
+      if (["madScienceInventionOne", "madScienceInventionTwo"].includes(question.id)) {
+        return { ...question, showWhen: archetypeIs("Mad Scientist") };
+      }
+
+      if (question.id === "arcanePool") {
+        return {
+          ...question,
+          showWhen: (answers) =>
+            ["Blessed", "Huckster", "Shaman", "Mad Scientist"].includes(
+              getAnswerString(answers, "archetype", "Gunslinger"),
+            ),
+        };
+      }
+
+      return question;
+    });
   }
 
   if (normalizedRuleset === "savage rifts") {
@@ -755,9 +1076,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "support", label: "Support / utility" },
       ]),
       createNumberQuestion("bennies", "Starting bennies", 1, 5, 3),
-      createTextareaQuestion("background", "What hard life shaped them?"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "What hard life shaped them?", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
       ];
   }
 
@@ -776,9 +1099,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Face", label: "Face" },
       ]),
       createNumberQuestion("ferocity", "Ferocity", 1, 5, 3),
-      createTextareaQuestion("background", "Crew history"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "Crew history", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
       ];
   }
 
@@ -796,9 +1121,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "control", label: "Control / utility" },
       ]),
       createNumberQuestion("control", "Power control", 1, 5, 3),
-      createTextareaQuestion("background", "Public identity or burden"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "Public identity or burden", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
       ];
   }
 
@@ -817,9 +1144,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Mechanics", label: "Mechanics" },
       ]),
       createNumberQuestion("forceAffinity", "Force affinity", 0, 5, 1),
-      createTextareaQuestion("background", "What debt, duty, or cause drives them?"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "What debt, duty, or cause drives them?", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
       ];
   }
 
@@ -846,9 +1175,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "water", label: "Water" },
         { value: "void", label: "Void" },
       ]),
-      createTextareaQuestion("background", "Duty or personal conflict"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "Duty or personal conflict", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
       ];
   }
 
@@ -867,9 +1198,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Sandman", label: "Sandman" },
       ]),
       createNumberQuestion("humanity", "Starting humanity", 4, 8, 6),
-      createTextareaQuestion("background", "What still anchors their human side?"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "What still anchors their human side?", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
       ];
   }
 
@@ -889,9 +1222,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Firearms", label: "Firearms" },
       ]),
       createNumberQuestion("nerve", "Nerve / steadiness", 1, 5, 3),
-      createTextareaQuestion("background", "What truth are they chasing?"),
-      createTextareaQuestion("physicalDescription", "Physical description"),
-      createTextareaQuestion("personality", "Personality"),
+      createAgeQuestion(),
+      createGenderQuestion(),
+      createTextareaQuestion("background", "What truth are they chasing?", "", undefined, 8000),
+      createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+      createTextareaQuestion("personality", "Personality", "", undefined, 5000),
       ];
   }
 
@@ -913,9 +1248,11 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
       { value: "Combat trick", label: "Combat trick" },
       { value: "Protective ward", label: "Protective ward" },
     ]),
-    createTextareaQuestion("background", "Background"),
-    createTextareaQuestion("physicalDescription", "Physical description"),
-    createTextareaQuestion("personality", "Personality"),
+    createAgeQuestion(),
+    createGenderQuestion(),
+    createTextareaQuestion("background", "Background", "", undefined, 8000),
+    createTextareaQuestion("physicalDescription", "Physical description", "", undefined, 3000),
+    createTextareaQuestion("personality", "Personality", "", undefined, 5000),
   ];
 }
 
@@ -1035,8 +1372,161 @@ function buildPortraitDataUrl(
     : "";
 }
 
+function compactBehaviorText(value: unknown, maxLength: number) {
+  if (typeof value !== "string") {
+    return "";
+  }
+
+  const cleaned = value.replace(/\s+/g, " ").trim();
+
+  if (!cleaned) {
+    return "";
+  }
+
+  const sentenceMatch = cleaned.match(/^(.{1,220}?[.!?])(?:\s|$)/);
+  const baseValue = sentenceMatch?.[1]?.trim() || cleaned;
+
+  if (baseValue.length <= maxLength) {
+    return baseValue;
+  }
+
+  return `${baseValue.slice(0, maxLength - 3).trim()}...`;
+}
+
+export function deriveBehaviorSummary(
+  sheetJson: unknown,
+  characterName = "This character",
+  fallbackMemorySummary?: string | null,
+) {
+  const typedSheet =
+    sheetJson && typeof sheetJson === "object" && !Array.isArray(sheetJson)
+      ? (sheetJson as Record<string, unknown>)
+      : {};
+
+  const identityParts = [
+    typeof typedSheet.ancestry === "string" ? typedSheet.ancestry.trim() : "",
+    typeof typedSheet.class === "string"
+      ? typedSheet.class.trim()
+      : typeof typedSheet.archetype === "string"
+        ? typedSheet.archetype.trim()
+        : typeof typedSheet.role === "string"
+          ? typedSheet.role.trim()
+          : typeof typedSheet.occupation === "string"
+            ? typedSheet.occupation.trim()
+            : "",
+  ].filter(Boolean);
+  const physicalSnippet = compactBehaviorText(typedSheet.physicalDescription, 140);
+  const backgroundSnippet = compactBehaviorText(typedSheet.background, 180);
+  const personalitySnippet = compactBehaviorText(typedSheet.personality, 180);
+  const summaryParts = [
+    identityParts.length > 0
+      ? `${characterName} is a ${identityParts.join(" ")}.`
+      : "",
+    physicalSnippet ? `Looks: ${physicalSnippet}` : "",
+    backgroundSnippet ? `Background: ${backgroundSnippet}` : "",
+    personalitySnippet ? `Behavior: ${personalitySnippet}` : "",
+  ].filter(Boolean);
+
+  if (summaryParts.length === 0) {
+    const compactMemory = compactBehaviorText(fallbackMemorySummary, 220);
+    return compactMemory || `${characterName} is defined by a steady but still-evolving history.`;
+  }
+
+  return summaryParts.join(" ");
+}
+
+export function deriveBehaviorDirectives(sheetJson: unknown): string[] {
+  const typedSheet =
+    sheetJson && typeof sheetJson === "object" && !Array.isArray(sheetJson)
+      ? (sheetJson as Record<string, unknown>)
+      : {};
+  const personalityText =
+    typeof typedSheet.personality === "string"
+      ? typedSheet.personality.trim()
+      : "";
+  const behaviorSummary =
+    typeof typedSheet.behaviorSummary === "string"
+      ? typedSheet.behaviorSummary.trim()
+      : "";
+  const source = `${personalityText} ${behaviorSummary}`.toLowerCase();
+  const directives: string[] = [];
+  const pushDirective = (value: string) => {
+    if (!directives.includes(value)) {
+      directives.push(value);
+    }
+  };
+
+  if (!source) {
+    return [];
+  }
+
+  if (/\b(cautious|careful|wary|methodical|measured|risk-averse)\b/.test(source)) {
+    pushDirective("Prefer caution and verify risks before committing.");
+  }
+  if (/\b(reckless|impulsive|brash|hot-headed|headstrong|bold)\b/.test(source)) {
+    pushDirective("Act decisively and accept risk rather than over-planning.");
+  }
+  if (/\b(blunt|direct|plainspoken|straightforward)\b/.test(source)) {
+    pushDirective("Speak bluntly and directly; avoid flowery phrasing.");
+  }
+  if (/\b(formal|courtly|polite|respectful|diplomatic)\b/.test(source)) {
+    pushDirective("Maintain formal, respectful speech even under pressure.");
+  }
+  if (/\b(sarcastic|witty|dry humor|snarky)\b/.test(source)) {
+    pushDirective("Use dry wit or sharp sarcasm in dialogue.");
+  }
+  if (/\b(quiet|reserved|guarded|secretive|stoic)\b/.test(source)) {
+    pushDirective("Keep statements concise and reveal little unless necessary.");
+  }
+  if (/\b(loyal|protective|selfless|self-sacrificing)\b/.test(source)) {
+    pushDirective("Prioritize ally safety and loyalty over personal gain.");
+  }
+  if (/\b(self-serving|greedy|opportunistic|ambitious)\b/.test(source)) {
+    pushDirective("Prioritize leverage, reward, or personal advantage.");
+  }
+  if (/\b(curious|scholarly|analytical|inquisitive|investigative)\b/.test(source)) {
+    pushDirective("Ask probing questions and focus on clues and details.");
+  }
+  if (/\b(vengeful|ruthless|cold|merciless)\b/.test(source)) {
+    pushDirective("Favor hardline or uncompromising responses to threats.");
+  }
+
+  return directives.slice(0, 5);
+}
+
+export function withDerivedBehaviorSummary(
+  sheetJson: unknown,
+  characterName = "This character",
+  fallbackMemorySummary?: string | null,
+) {
+  const typedSheet =
+    sheetJson && typeof sheetJson === "object" && !Array.isArray(sheetJson)
+      ? ({ ...(sheetJson as Record<string, unknown>) } as Record<string, unknown>)
+      : {};
+
+  typedSheet.behaviorSummary = deriveBehaviorSummary(
+    typedSheet,
+    characterName,
+    fallbackMemorySummary,
+  );
+  typedSheet.behaviorDirectives = deriveBehaviorDirectives(typedSheet);
+
+  return typedSheet;
+}
+
 function appendPersonalitySummary(summary: string, personalityText: string) {
   return `${summary} Personality: ${personalityText}.`;
+}
+
+function finalizeGeneratedCharacter(character: StarterCharacter) {
+  return {
+    ...character,
+    sheetJson: withDerivedBehaviorSummary(
+      character.sheetJson,
+      character.name,
+      character.memorySummary,
+    ),
+  };
 }
 
 function chaMod(stats: {
@@ -1055,10 +1545,10 @@ function hasDndSpellcastingSlots(characterClass: string, level: number) {
 
 function buildDndSpellSlots(characterClass: string, level: number) {
   if (characterClass === "Warlock") {
-    return {
+    return finalizeGeneratedCharacter({
       pact: level >= 2 ? 2 : 1,
       slotLevel: level >= 3 ? 2 : 1,
-    };
+    });
   }
 
   if (["Paladin", "Ranger"].includes(characterClass)) {
@@ -1321,10 +1811,31 @@ export function validateCharacterAnswers(
   ruleset: string,
   answers: Record<string, string | number | null | undefined>,
 ) {
-  const questions = getVisibleCharacterQuestions(ruleset, answers);
+  return validateCharacterAnswersDetailed(ruleset, answers).formError;
+}
+
+export type CharacterValidationResult = {
+  formError: string;
+  fieldErrors: Record<string, string>;
+};
+
+export function validateCharacterAnswersDetailed(
+  ruleset: string,
+  answers: Record<string, string | number | null | undefined>,
+): CharacterValidationResult {
+  const sanitizedAnswers = sanitizeCharacterAnswersForLimits(answers);
+  const normalizedRuleset = normalizeRuleset(ruleset);
+  const questions = getVisibleCharacterQuestions(ruleset, sanitizedAnswers);
+  const fieldErrors: Record<string, string> = {};
+
+  const setFieldError = (fieldId: string, message: string) => {
+    if (!fieldErrors[fieldId]) {
+      fieldErrors[fieldId] = message;
+    }
+  };
 
   for (const question of questions) {
-    const rawValue = answers[question.id];
+    const rawValue = sanitizedAnswers[question.id];
 
     if (question.required) {
       if (question.kind === "number") {
@@ -1332,21 +1843,30 @@ export function validateCharacterAnswers(
           typeof rawValue !== "number" &&
           !(typeof rawValue === "string" && rawValue.trim())
         ) {
-          return `${question.label} is required`;
+          setFieldError(question.id, `${question.label} is required`);
         }
       } else if (!(typeof rawValue === "string" && rawValue.trim())) {
-        return `${question.label} is required`;
+        setFieldError(question.id, `${question.label} is required`);
       }
     }
 
-    if (question.kind === "select" && typeof rawValue === "string" && question.options) {
-      const validValues = question.options.map((option) => option.value);
-      if (rawValue && !validValues.includes(rawValue)) {
-        return `${question.label} is invalid`;
+      if (question.kind === "select" && typeof rawValue === "string" && question.options) {
+        const validValues = question.options.map((option) => option.value);
+        if (rawValue && !validValues.includes(rawValue)) {
+          setFieldError(question.id, `${question.label} is invalid`);
+        }
       }
-    }
 
-    if (question.kind === "number") {
+      if (
+        question.kind === "textarea" &&
+        typeof rawValue === "string" &&
+        question.maxLength &&
+        rawValue.length > question.maxLength
+      ) {
+        setFieldError(question.id, `${question.label} is too long`);
+      }
+
+      if (question.kind === "number") {
       const numericValue = getAnswerNumber(
         answers,
         question.id,
@@ -1357,19 +1877,267 @@ export function validateCharacterAnswers(
         typeof question.min === "number" &&
         numericValue < question.min
       ) {
-        return `${question.label} is too low`;
+        setFieldError(question.id, `${question.label} is too low`);
       }
 
       if (
         typeof question.max === "number" &&
         numericValue > question.max
       ) {
-        return `${question.label} is too high`;
+        setFieldError(question.id, `${question.label} is too high`);
       }
     }
   }
 
-  return "";
+  if (normalizedRuleset === "deadlands classic") {
+    const traitKeys = [
+      "deftness",
+      "nimbleness",
+      "quickness",
+      "strength",
+      "vigor",
+      "cognition",
+      "knowledge",
+      "mien",
+      "smarts",
+      "spirit",
+    ] as const;
+    const traitValues = traitKeys.map((key) => getAnswerNumber(answers, key, 3));
+    const traitTotal = traitValues.reduce((total, value) => total + value, 0);
+
+    // Phase B baseline budget: keep novice traits in a bounded range.
+    if (traitTotal > 34) {
+      setFieldError(
+        "deftness",
+        "Deadlands trait total is too high (maximum 34 for novice builds)",
+      );
+    }
+
+    if (traitTotal < 24) {
+      setFieldError(
+        "deftness",
+        "Deadlands trait total is too low (minimum 24 for novice builds)",
+      );
+    }
+
+    const archetype = getAnswerString(answers, "archetype", "Gunslinger");
+    const edgeOne = getAnswerString(
+      answers,
+      "edgeOne",
+      getAnswerString(answers, "bestEdge", "Quick Draw"),
+    );
+    const edgeTwo = getAnswerString(answers, "edgeTwo", "None");
+    const hindranceOne = getAnswerString(
+      answers,
+      "hindranceOne",
+      getAnswerString(answers, "hindrance", "Enemy"),
+    );
+    const hindranceTwo = getAnswerString(answers, "hindranceTwo", "None");
+    const selectedEdges = [edgeOne, edgeTwo]
+      .map((value) => value.trim())
+      .filter((value) => value && value !== "None");
+    const selectedHindrances = [hindranceOne, hindranceTwo]
+      .map((value) => value.trim())
+      .filter((value) => value && value !== "None");
+    const blessedMiracleOne = getAnswerString(answers, "blessedMiracleOne", "Smite");
+    const blessedMiracleTwo = getAnswerString(answers, "blessedMiracleTwo", "None");
+    const hucksterHexOne = getAnswerString(answers, "hucksterHexOne", "Soul Blast");
+    const hucksterHexTwo = getAnswerString(answers, "hucksterHexTwo", "None");
+    const shamanFavorOne = getAnswerString(answers, "shamanFavorOne", "Spirit Warrior");
+    const shamanFavorTwo = getAnswerString(answers, "shamanFavorTwo", "None");
+    const madScienceInventionOne = getAnswerString(
+      answers,
+      "madScienceInventionOne",
+      "Electrostatic Projector",
+    );
+    const madScienceInventionTwo = getAnswerString(answers, "madScienceInventionTwo", "None");
+    const arcanePool = getAnswerNumber(answers, "arcanePool", 3);
+    const primarySkill = getAnswerString(answers, "primarySkill", "Shootin'");
+    const secondarySkill = getAnswerString(answers, "secondarySkill", "Guts");
+    const guts = getAnswerNumber(answers, "guts", 2);
+
+    if (primarySkill === secondarySkill) {
+      setFieldError("primarySkill", "Primary and secondary skills must be different");
+      setFieldError("secondarySkill", "Primary and secondary skills must be different");
+    }
+
+    const arcaneArchetypes = new Set([
+      "Huckster",
+      "Blessed",
+      "Shaman",
+      "Mad Scientist",
+    ]);
+
+    if (selectedEdges.length < 1) {
+      setFieldError("edgeOne", "At least one edge is required");
+    }
+
+    if (new Set(selectedEdges).size !== selectedEdges.length) {
+      setFieldError("edgeOne", "Duplicate edges are not allowed");
+      setFieldError("edgeTwo", "Duplicate edges are not allowed");
+    }
+
+    if (new Set(selectedHindrances).size !== selectedHindrances.length) {
+      setFieldError("hindranceOne", "Duplicate hindrances are not allowed");
+      setFieldError("hindranceTwo", "Duplicate hindrances are not allowed");
+    }
+
+    if (selectedHindrances.length < 1) {
+      setFieldError("hindranceOne", "At least one hindrance is required");
+    }
+
+    if (selectedEdges.includes("Arcane Background") && !arcaneArchetypes.has(archetype)) {
+      setFieldError("edgeOne", "Arcane Background is only valid for arcane archetypes");
+      setFieldError("edgeTwo", "Arcane Background is only valid for arcane archetypes");
+    }
+
+    if (!selectedEdges.includes("Arcane Background") && arcaneArchetypes.has(archetype)) {
+      setFieldError("edgeOne", `${archetype} requires Arcane Background`);
+    }
+
+    const requiredSkillByArchetype: Record<string, string> = {
+      Blessed: "Faith",
+      Shaman: "Faith",
+      Huckster: "Hexslingin'",
+      "Mad Scientist": "Mad Science",
+    };
+    const requiredSkill = requiredSkillByArchetype[archetype];
+    if (
+      requiredSkill &&
+      primarySkill !== requiredSkill &&
+      secondarySkill !== requiredSkill
+    ) {
+      const message = `${archetype} must take ${requiredSkill} as a primary or secondary skill`;
+      setFieldError("primarySkill", message);
+      setFieldError("secondarySkill", message);
+    }
+
+    const selectedArcanePowers =
+      archetype === "Blessed"
+        ? [blessedMiracleOne, blessedMiracleTwo]
+        : archetype === "Huckster"
+          ? [hucksterHexOne, hucksterHexTwo]
+          : archetype === "Shaman"
+            ? [shamanFavorOne, shamanFavorTwo]
+            : archetype === "Mad Scientist"
+              ? [madScienceInventionOne, madScienceInventionTwo]
+              : [];
+    const distinctArcanePowers = selectedArcanePowers
+      .map((value) => value.trim())
+      .filter((value) => value && value !== "None");
+    if (arcaneArchetypes.has(archetype)) {
+      if (distinctArcanePowers.length < 1) {
+        if (archetype === "Blessed") {
+          setFieldError("blessedMiracleOne", "Blessed requires at least one miracle");
+        } else if (archetype === "Huckster") {
+          setFieldError("hucksterHexOne", "Huckster requires at least one hex");
+        } else if (archetype === "Shaman") {
+          setFieldError("shamanFavorOne", "Shaman requires at least one favor");
+        } else if (archetype === "Mad Scientist") {
+          setFieldError("madScienceInventionOne", "Mad Scientist requires at least one invention");
+        }
+      }
+
+      if (new Set(distinctArcanePowers).size !== distinctArcanePowers.length) {
+        if (archetype === "Blessed") {
+          setFieldError("blessedMiracleTwo", "Duplicate miracles are not allowed");
+        } else if (archetype === "Huckster") {
+          setFieldError("hucksterHexTwo", "Duplicate hexes are not allowed");
+        } else if (archetype === "Shaman") {
+          setFieldError("shamanFavorTwo", "Duplicate favors are not allowed");
+        } else if (archetype === "Mad Scientist") {
+          setFieldError("madScienceInventionTwo", "Duplicate inventions are not allowed");
+        }
+      }
+
+      if (arcanePool < 1) {
+        setFieldError("arcanePool", "Arcane archetypes require at least 1 arcane point");
+      }
+    }
+
+    const legalHindrances = new Set([
+      "Enemy",
+      "Greedy",
+      "Loyal",
+      "Mean as a Rattler",
+      "Vengeful",
+      "Wanted",
+      "Night Terrors",
+    ]);
+    for (const hindrance of selectedHindrances) {
+      if (!legalHindrances.has(hindrance)) {
+        setFieldError("hindranceOne", "Selected hindrance is invalid");
+      }
+    }
+
+    if (
+      selectedHindrances.includes("Loyal") &&
+      selectedHindrances.includes("Mean as a Rattler")
+    ) {
+      setFieldError("hindranceOne", "Loyal cannot be combined with Mean as a Rattler");
+      setFieldError("hindranceTwo", "Loyal cannot be combined with Mean as a Rattler");
+    }
+
+    if (archetype === "Lawman" && selectedHindrances.includes("Wanted")) {
+      setFieldError("hindranceOne", "Lawman cannot take Wanted");
+      setFieldError("hindranceTwo", "Lawman cannot take Wanted");
+    }
+
+    const woundIgnore = getAnswerString(answers, "woundIgnore", "None");
+    const woundHead = getAnswerNumber(answers, "woundHead", 0);
+    const woundGuts = getAnswerNumber(answers, "woundGuts", 0);
+    const woundLeftArm = getAnswerNumber(answers, "woundLeftArm", 0);
+    const woundRightArm = getAnswerNumber(answers, "woundRightArm", 0);
+    const woundLeftLeg = getAnswerNumber(answers, "woundLeftLeg", 0);
+    const woundRightLeg = getAnswerNumber(answers, "woundRightLeg", 0);
+    const locationWounds = [
+      ["woundHead", woundHead],
+      ["woundGuts", woundGuts],
+      ["woundLeftArm", woundLeftArm],
+      ["woundRightArm", woundRightArm],
+      ["woundLeftLeg", woundLeftLeg],
+      ["woundRightLeg", woundRightLeg],
+    ] as const;
+    const fateWhite = getAnswerNumber(answers, "fateWhite", 2);
+    const fateRed = getAnswerNumber(answers, "fateRed", 1);
+    const fateBlue = getAnswerNumber(answers, "fateBlue", 0);
+    const fateLegend = getAnswerNumber(answers, "fateLegend", 0);
+    const fateChipValues = [
+      ["fateWhite", fateWhite],
+      ["fateRed", fateRed],
+      ["fateBlue", fateBlue],
+      ["fateLegend", fateLegend],
+    ] as const;
+
+    for (const [fieldId, value] of locationWounds) {
+      if (value < 0 || value > 4) {
+        setFieldError(fieldId, "Wound values must be between 0 and 4");
+      }
+    }
+    for (const [fieldId, value] of fateChipValues) {
+      if (value < 0 || value > 10) {
+        setFieldError(fieldId, "Fate chip values must be between 0 and 10");
+      }
+    }
+
+    if (woundIgnore === "Nerves o' Steel" && !selectedEdges.includes("Nerves o' Steel")) {
+      setFieldError(
+        "woundIgnore",
+        "Nerves o' Steel wound ignore requires the Nerves o' Steel edge",
+      );
+    }
+
+    if (woundIgnore === "Veteran Resolve" && guts < 4) {
+      setFieldError("woundIgnore", "Veteran Resolve wound ignore requires Guts 4+");
+    }
+  }
+
+  const firstError = Object.values(fieldErrors)[0] ?? "";
+
+  return {
+    formError: firstError,
+    fieldErrors,
+  };
 }
 
 export function buildGeneratedCharacter(
@@ -1377,13 +2145,16 @@ export function buildGeneratedCharacter(
   name: string,
   answers: Record<string, string | number | null | undefined>,
 ): StarterCharacter {
+  const sanitizedAnswers = sanitizeCharacterAnswersForLimits(answers);
   const normalizedRuleset = normalizeRuleset(ruleset);
   const cleanName = name.trim() || "Main Character";
-  const background = getAnswerString(answers, "background", "");
-  const backgroundText = background || "A capable figure stepping into danger.";
-  const physicalDescriptionText = buildPhysicalDescriptionText(answers);
-  const portraitDataUrl = buildPortraitDataUrl(answers);
-  const personalityText = buildPersonalityText(answers);
+  const background = getAnswerString(sanitizedAnswers, "background", "");
+    const backgroundText = background || "A capable figure stepping into danger.";
+    const physicalDescriptionText = buildPhysicalDescriptionText(sanitizedAnswers);
+    const portraitDataUrl = buildPortraitDataUrl(sanitizedAnswers);
+    const personalityText = buildPersonalityText(sanitizedAnswers);
+    const age = getAnswerNumber(sanitizedAnswers, "age", 30);
+    const gender = getAnswerString(sanitizedAnswers, "gender", "Other");
 
   if (normalizedRuleset === "d&d 5e") {
     const level = getAnswerNumber(answers, "level", 1);
@@ -1436,8 +2207,15 @@ export function buildGeneratedCharacter(
       "arcaneTradition",
       "Evocation",
     );
-    const weapon = getAnswerString(answers, "weapon", "Longsword");
+    const mainHand = getAnswerString(
+      answers,
+      "mainHand",
+      getAnswerString(answers, "weapon", "Longsword"),
+    );
+    const offHand = getAnswerString(answers, "offHand", "None");
+    const rangedWeapon = getAnswerString(answers, "rangedWeapon", "None");
     const armor = getAnswerString(answers, "armor", "No Armor");
+    const shieldEquipped = getAnswerString(answers, "shieldEquipped", "No") === "Yes";
     const gearKit = getAnswerString(answers, "gearKit", "Explorer's Pack");
     const cantripOne = getAnswerString(answers, "cantripOne", "None");
     const cantripTwo = getAnswerString(answers, "cantripTwo", "None");
@@ -1449,11 +2227,14 @@ export function buildGeneratedCharacter(
     const spellLevel3A = getAnswerString(answers, "spellLevel3A", "None");
     const armorBase: Record<string, { base: number; dexCap: number | null }> = {
       "No Armor": { base: 10, dexCap: null },
-      Shield: { base: 13, dexCap: null },
       Leather: { base: 11, dexCap: null },
+      "Studded Leather": { base: 12, dexCap: null },
       "Chain Shirt": { base: 13, dexCap: 2 },
       "Scale Mail": { base: 14, dexCap: 2 },
+      Breastplate: { base: 14, dexCap: 2 },
+      "Half Plate": { base: 15, dexCap: 2 },
       "Chain Mail": { base: 16, dexCap: 0 },
+      Plate: { base: 18, dexCap: 0 },
     };
     const classHitDie: Record<string, number> = {
       Barbarian: 12,
@@ -1470,14 +2251,17 @@ export function buildGeneratedCharacter(
       Wizard: 6,
     };
     const ancestryTraits: Record<string, string[]> = {
+      Aasimar: ["Darkvision", "Celestial Resistance", "Healing Hands"],
       Dragonborn: ["Draconic ancestry", "Breath Weapon", "Damage resistance"],
       Dwarf: ["Darkvision", "Dwarven Resilience", "Stonecunning"],
       Elf: ["Darkvision", "Fey Ancestry", "Trance"],
       Gnome: ["Darkvision", "Gnome Cunning"],
+      Goliath: ["Powerful Build", "Stone's Endurance", "Mountain Born"],
       "Half-Elf": ["Darkvision", "Fey Ancestry", "Skill Versatility"],
       "Half-Orc": ["Darkvision", "Relentless Endurance", "Savage Attacks"],
       Halfling: ["Lucky", "Brave", "Halfling Nimbleness"],
       Human: ["Versatile", "Extra language"],
+      Orc: ["Darkvision", "Aggressive", "Powerful Build"],
       Tiefling: ["Darkvision", "Hellish Resistance", "Infernal Legacy"],
     };
     const heritageTraits: Record<string, string[]> = {
@@ -1534,6 +2318,9 @@ export function buildGeneratedCharacter(
       armor !== "No Armor"
     ) {
       ac += 1;
+    }
+    if (shieldEquipped) {
+      ac += 2;
     }
     const knownCantrips = [cantripOne, cantripTwo, cantripThree].filter(
       (spell, index, values) =>
@@ -1608,9 +2395,12 @@ export function buildGeneratedCharacter(
       combatFeatures.push(`Subclass: ${subclassByClass[characterClass]}`);
     }
     const darkvisionSources = new Set([
+      "Aasimar",
       "Dwarf",
       "Elf",
       "Gnome",
+      "Orc",
+      "Goliath",
       "Half-Elf",
       "Half-Orc",
       "Tiefling",
@@ -1646,7 +2436,14 @@ export function buildGeneratedCharacter(
             ? ["Musical instrument"]
             : [],
     };
-    const equipment = [weapon, armor, gearKit];
+    const equippedItems = [
+      mainHand !== "None" ? mainHand : "",
+      offHand !== "None" ? offHand : "",
+      rangedWeapon !== "None" ? rangedWeapon : "",
+      shieldEquipped ? "Shield" : "",
+      armor !== "No Armor" ? armor : "",
+    ].filter(Boolean);
+    const equipment = [...equippedItems, gearKit];
     if (characterClass === "Rogue") {
       equipment.push("Thieves' Tools");
     }
@@ -1667,6 +2464,78 @@ export function buildGeneratedCharacter(
                 : characterClass === "Warlock"
               ? { pactSlots: level >= 2 ? 2 : 1 }
                   : {};
+    const weaponStatByName: Record<string, "str" | "dex"> = {
+      Dagger: "dex",
+      Rapier: "dex",
+      Scimitar: "dex",
+      Shortsword: "dex",
+      Longbow: "dex",
+      Shortbow: "dex",
+      Crossbow: "dex",
+      Sling: "dex",
+    };
+    const weaponDamageByName: Record<string, string> = {
+      Battleaxe: "1d8 slashing",
+      Crossbow: "1d8 piercing",
+      Dagger: "1d4 piercing",
+      Greataxe: "1d12 slashing",
+      Greatsword: "2d6 slashing",
+      Javelin: "1d6 piercing",
+      Handaxe: "1d6 slashing",
+      "Light Hammer": "1d4 bludgeoning",
+      Longsword: "1d8 slashing",
+      Longbow: "1d8 piercing",
+      Mace: "1d6 bludgeoning",
+      Maul: "2d6 bludgeoning",
+      Quarterstaff: "1d6 bludgeoning",
+      Rapier: "1d8 piercing",
+      Scimitar: "1d6 slashing",
+      Shortsword: "1d6 piercing",
+      Shortbow: "1d6 piercing",
+      Spear: "1d6 piercing",
+      Sling: "1d4 bludgeoning",
+    };
+    const proficiencyBonus = level >= 9 ? 4 : level >= 5 ? 3 : 2;
+    const resolveWeaponAttack = (weaponName: string) => {
+      if (!weaponName || weaponName === "None") {
+        return null;
+      }
+
+      const statKey = weaponStatByName[weaponName] ?? "str";
+      const statValue = stats[statKey];
+      const modifier = Math.floor((statValue - 10) / 2);
+      const attackBonus = proficiencyBonus + modifier;
+      const damageDice = weaponDamageByName[weaponName] ?? "1d6";
+      const damageModText =
+        modifier === 0
+          ? ""
+          : modifier > 0
+            ? ` + ${modifier}`
+            : ` - ${Math.abs(modifier)}`;
+
+      return {
+        weapon: weaponName,
+        attackBonus,
+        damage: `${damageDice}${damageModText}`,
+        ability: statKey === "dex" ? "Dexterity" : "Strength",
+      };
+    };
+    const spellcastingAbilityMod =
+      spellcastingAbility === "Intelligence"
+        ? Math.floor((stats.int - 10) / 2)
+        : spellcastingAbility === "Wisdom"
+          ? Math.floor((stats.wis - 10) / 2)
+          : spellcastingAbility === "Charisma"
+            ? Math.floor((stats.cha - 10) / 2)
+            : 0;
+    const spellAttackBonus =
+      spellcastingAbility === "None"
+        ? null
+        : proficiencyBonus + spellcastingAbilityMod;
+    const spellSaveDc =
+      spellcastingAbility === "None"
+        ? null
+        : 8 + proficiencyBonus + spellcastingAbilityMod;
     const spellData = hasDndSpellcastingSlots(characterClass, level)
       ? {
           cantrips: spellcastingClasses.has(characterClass) ? knownCantrips : [],
@@ -1700,7 +2569,7 @@ export function buildGeneratedCharacter(
         }
       : null;
 
-    return {
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1709,7 +2578,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         class: characterClass,
         ancestry,
         heritage,
@@ -1720,10 +2591,19 @@ export function buildGeneratedCharacter(
           ancestry === "Dwarf" || ancestry === "Halfling" || ancestry === "Gnome"
             ? 25
             : 30,
-        proficiencyBonus: 2,
-        weapon,
+        proficiencyBonus,
+        mainHand,
+        offHand,
+        rangedWeapon,
+        shieldEquipped,
         armor,
+        attackProfiles: {
+          mainHand: resolveWeaponAttack(mainHand),
+          offHand: resolveWeaponAttack(offHand),
+          ranged: resolveWeaponAttack(rangedWeapon),
+        },
         equipment,
+        equippedItems,
         racialTraits: [
           ...(ancestryTraits[ancestry] ?? ["Adaptable heritage"]),
           ...(heritageTraits[heritage] ?? []),
@@ -1733,6 +2613,8 @@ export function buildGeneratedCharacter(
         proficiencies,
         senses,
         spellcastingAbility,
+        spellAttackBonus,
+        spellSaveDc,
         spells: spellData,
         resources: classResources,
         spellSlots:
@@ -1745,14 +2627,141 @@ export function buildGeneratedCharacter(
         `${cleanName} is a level ${level} ${ancestry.toLowerCase()} ${characterClass.toLowerCase()} shaped by ${backgroundText.toLowerCase()}. Key features include ${(combatFeatures[0] ?? "solid fundamentals").toLowerCase()}${combatFeatures[1] ? ` and ${combatFeatures[1].toLowerCase()}` : ""}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "deadlands classic") {
     const archetype = getAnswerString(answers, "archetype", "Gunslinger");
-    const bestEdge = getAnswerString(answers, "bestEdge", "Quick Draw");
+    const edgeOne = getAnswerString(
+      answers,
+      "edgeOne",
+      getAnswerString(answers, "bestEdge", "Quick Draw"),
+    );
+    const edgeTwo = getAnswerString(answers, "edgeTwo", "None");
+    const hindranceOne = getAnswerString(
+      answers,
+      "hindranceOne",
+      getAnswerString(answers, "hindrance", "Wanted"),
+    );
+    const hindranceTwo = getAnswerString(answers, "hindranceTwo", "None");
+    const selectedEdges = [edgeOne, edgeTwo].filter(
+      (value, index, values) => value !== "None" && values.indexOf(value) === index,
+    );
+    const selectedHindrances = [hindranceOne, hindranceTwo].filter(
+      (value, index, values) => value !== "None" && values.indexOf(value) === index,
+    );
+    const blessedMiracleOne = getAnswerString(answers, "blessedMiracleOne", "Smite");
+    const blessedMiracleTwo = getAnswerString(answers, "blessedMiracleTwo", "None");
+    const hucksterHexOne = getAnswerString(answers, "hucksterHexOne", "Soul Blast");
+    const hucksterHexTwo = getAnswerString(answers, "hucksterHexTwo", "None");
+    const shamanFavorOne = getAnswerString(answers, "shamanFavorOne", "Spirit Warrior");
+    const shamanFavorTwo = getAnswerString(answers, "shamanFavorTwo", "None");
+    const madScienceInventionOne = getAnswerString(
+      answers,
+      "madScienceInventionOne",
+      "Electrostatic Projector",
+    );
+    const madScienceInventionTwo = getAnswerString(answers, "madScienceInventionTwo", "None");
+    const arcanePool = getAnswerNumber(answers, "arcanePool", 3);
     const guts = getAnswerNumber(answers, "guts", 2);
-    return {
+    const deftness = getAnswerNumber(answers, "deftness", 3);
+    const nimbleness = getAnswerNumber(answers, "nimbleness", 3);
+    const quickness = getAnswerNumber(answers, "quickness", 3);
+    const strength = getAnswerNumber(answers, "strength", 3);
+    const vigor = getAnswerNumber(answers, "vigor", 3);
+    const cognition = getAnswerNumber(answers, "cognition", 3);
+    const knowledge = getAnswerNumber(answers, "knowledge", 3);
+    const mien = getAnswerNumber(answers, "mien", 3);
+    const smarts = getAnswerNumber(answers, "smarts", 3);
+    const spirit = getAnswerNumber(answers, "spirit", 3);
+    const primarySkill = getAnswerString(answers, "primarySkill", "Shootin'");
+    const secondarySkill = getAnswerString(answers, "secondarySkill", "Guts");
+    const mainHand = getAnswerString(answers, "mainHand", "Colt Peacemaker");
+    const offHand = getAnswerString(answers, "offHand", "None");
+    const longarm = getAnswerString(answers, "longarm", "None");
+    const woundIgnore = getAnswerString(answers, "woundIgnore", "None");
+    const woundHead = Math.max(0, Math.min(4, getAnswerNumber(answers, "woundHead", 0)));
+    const woundGuts = Math.max(0, Math.min(4, getAnswerNumber(answers, "woundGuts", 0)));
+    const woundLeftArm = Math.max(0, Math.min(4, getAnswerNumber(answers, "woundLeftArm", 0)));
+    const woundRightArm = Math.max(0, Math.min(4, getAnswerNumber(answers, "woundRightArm", 0)));
+    const woundLeftLeg = Math.max(0, Math.min(4, getAnswerNumber(answers, "woundLeftLeg", 0)));
+    const woundRightLeg = Math.max(0, Math.min(4, getAnswerNumber(answers, "woundRightLeg", 0)));
+    const fateWhite = Math.max(0, Math.min(10, getAnswerNumber(answers, "fateWhite", 2)));
+    const fateRed = Math.max(0, Math.min(10, getAnswerNumber(answers, "fateRed", 1)));
+    const fateBlue = Math.max(0, Math.min(10, getAnswerNumber(answers, "fateBlue", 0)));
+    const fateLegend = Math.max(0, Math.min(10, getAnswerNumber(answers, "fateLegend", 0)));
+    const woundLocations = {
+      head: woundHead,
+      guts: woundGuts,
+      leftArm: woundLeftArm,
+      rightArm: woundRightArm,
+      leftLeg: woundLeftLeg,
+      rightLeg: woundRightLeg,
+    };
+    const fateChips = {
+      white: fateWhite,
+      red: fateRed,
+      blue: fateBlue,
+      legend: fateLegend,
+    };
+    const highestWound = Math.max(...Object.values(woundLocations));
+    const totalWounds = Object.values(woundLocations).reduce(
+      (total, value) => total + value,
+      0,
+    );
+    const woundLevelByValue = ["Unharmed", "Light", "Heavy", "Serious", "Critical"] as const;
+    const derivedWoundLevel = woundLevelByValue[highestWound] ?? "Critical";
+    const ignoreReduction =
+      woundIgnore === "Nerves o' Steel" || woundIgnore === "Veteran Resolve" ? 1 : 0;
+    const derivedPenalty = Math.min(0, ignoreReduction - highestWound);
+    const woundShorthand = `H${woundHead} G${woundGuts} LA${woundLeftArm} RA${woundRightArm} LL${woundLeftLeg} RL${woundRightLeg}`;
+    const fateChipShorthand = `W${fateWhite} R${fateRed} B${fateBlue} L${fateLegend}`;
+    const traitAverage =
+      (deftness +
+        nimbleness +
+        quickness +
+        strength +
+        vigor +
+        cognition +
+        knowledge +
+        mien +
+        smarts +
+        spirit) /
+      10;
+    const pace = Math.max(6, 6 + Math.floor((quickness - 3) / 2));
+    const wind = 6 + vigor + guts + Math.max(0, Math.floor((traitAverage - 3) / 2));
+    const baseSkills = [primarySkill, secondarySkill, "Guts", "Dodge"];
+    const archetypeSkills: Record<string, string[]> = {
+      Gunslinger: ["Shootin'", "Quick Draw", "Dodge"],
+      Gambler: ["Gamblin'", "Persuasion", "Scrutinize"],
+      Lawman: ["Overawe", "Shootin'", "Tracking"],
+      Huckster: ["Hexslingin'", "Scrutinize", "Ridicule"],
+      "Mad Scientist": ["Mad Science", "Knowledge (Academia)", "Shootin'"],
+      Blessed: ["Faith", "Guts", "Persuasion"],
+      Shaman: ["Faith", "Survival", "Tracking"],
+      "Bounty Hunter": ["Tracking", "Shootin'", "Fightin'"],
+      "Scout / Tracker": ["Tracking", "Survival", "Sneak"],
+      "Soldier / Cavalry": ["Shootin'", "Horse Ridin'", "Fightin'"],
+      Prospector: ["Survival", "Guts", "Scrutinize"],
+      "Showman / Entertainer": ["Persuasion", "Ridicule", "Overawe"],
+    };
+    const selectedSkills = [
+      ...new Set([...(archetypeSkills[archetype] ?? []), ...baseSkills]),
+    ];
+    const arcanePowers =
+      archetype === "Blessed"
+        ? [blessedMiracleOne, blessedMiracleTwo]
+        : archetype === "Huckster"
+          ? [hucksterHexOne, hucksterHexTwo]
+          : archetype === "Shaman"
+            ? [shamanFavorOne, shamanFavorTwo]
+            : archetype === "Mad Scientist"
+              ? [madScienceInventionOne, madScienceInventionTwo]
+              : [];
+    const selectedArcanePowers = arcanePowers.filter(
+      (value, index, values) => value !== "None" && values.indexOf(value) === index,
+    );
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1761,18 +2770,95 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         archetype,
-        pace: 8,
-        wind: 8 + guts,
+        pace,
+        wind,
         grit: guts,
-        edges: [bestEdge],
+        edgeOne,
+        edgeTwo,
+        hindranceOne,
+        hindranceTwo,
+        edges: selectedEdges,
+        hinderances: selectedHindrances,
+        arcanePool,
+        blessedMiracleOne,
+        blessedMiracleTwo,
+        hucksterHexOne,
+        hucksterHexTwo,
+        shamanFavorOne,
+        shamanFavorTwo,
+        madScienceInventionOne,
+        madScienceInventionTwo,
+        traits: {
+          deftness,
+          nimbleness,
+          quickness,
+          strength,
+          vigor,
+          cognition,
+          knowledge,
+          mien,
+          smarts,
+          spirit,
+        },
+        primarySkill,
+        secondarySkill,
+        skills: selectedSkills,
+        equipment: [
+          mainHand,
+          offHand !== "None" ? offHand : "",
+          longarm !== "None" ? longarm : "",
+          "Bedroll",
+          "Canteen",
+        ].filter(Boolean),
+        mainHand,
+        offHand,
+        longarm,
+        woundsByLocation: woundLocations,
+        woundShorthand,
+        fateChips,
+        fateChipShorthand,
+        wounds: {
+          current: highestWound,
+          max: 4,
+          threshold: 4,
+          level: derivedWoundLevel,
+          penalty: derivedPenalty,
+          total: totalWounds,
+          ignoreSource: woundIgnore,
+        },
+        arcane:
+          selectedArcanePowers.length > 0
+            ? {
+                background: archetype,
+                castingSkill:
+                  archetype === "Blessed" || archetype === "Shaman"
+                    ? "Faith"
+                    : archetype === "Huckster"
+                      ? "Hexslingin'"
+                      : archetype === "Mad Scientist"
+                        ? "Mad Science"
+                        : "None",
+                points: arcanePool,
+                powers: selectedArcanePowers,
+              }
+            : null,
+        woundLevels: [
+          { level: "Unharmed", value: 0, penalty: 0 },
+          { level: "Light", value: 1, penalty: -1 },
+          { level: "Heavy", value: 2, penalty: -2 },
+          { level: "Serious", value: 3, penalty: -3 },
+          { level: "Critical", value: 4, penalty: -4 },
+        ],
       },
       memorySummary: appendPersonalitySummary(
-        `${cleanName} is a ${archetype.toLowerCase()} with ${bestEdge.toLowerCase()} and trouble close behind: ${backgroundText.toLowerCase()}.`,
+        `${cleanName} is a ${archetype.toLowerCase()} with ${(selectedEdges[0] ?? edgeOne).toLowerCase()}, burdened by ${(selectedHindrances[0] ?? hindranceOne).toLowerCase()}, and trouble close behind: ${backgroundText.toLowerCase()}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "savage rifts") {
@@ -1781,7 +2867,7 @@ export function buildGeneratedCharacter(
     const bennies = getAnswerNumber(answers, "bennies", 3);
     const toughnessBase =
       framework === "Glitter Boy" ? 14 : framework === "Cyber-Knight" ? 11 : 8;
-    return {
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1790,7 +2876,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         framework,
         pace: combatRole === "mobile" ? 8 : 6,
         parry: combatRole === "frontline" ? 7 : 5,
@@ -1802,14 +2890,14 @@ export function buildGeneratedCharacter(
         `${cleanName} is a ${framework.toLowerCase()} serving as a ${combatRole} operator, hardened by ${backgroundText.toLowerCase()}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "mutants in the now") {
     const species = getAnswerString(answers, "species", "Mutant alley cat");
     const streetRole = getAnswerString(answers, "streetRole", "Scout");
     const ferocity = getAnswerNumber(answers, "ferocity", 3);
-    return {
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1818,7 +2906,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         species,
         role: streetRole,
         hp: 8 + ferocity,
@@ -1836,7 +2926,7 @@ export function buildGeneratedCharacter(
         `${cleanName} is a ${species.toLowerCase()} ${streetRole.toLowerCase()} with a history in ${backgroundText.toLowerCase()}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "astonishing super heroes") {
@@ -1849,7 +2939,7 @@ export function buildGeneratedCharacter(
         : powerProfile === "control"
           ? ["binding field", "countermeasure pulse"]
           : ["force blast", "kinetic barrier"];
-    return {
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1858,7 +2948,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         origin,
         powerSet,
         health: 14 + control,
@@ -1869,14 +2961,14 @@ export function buildGeneratedCharacter(
         `${cleanName} is a ${origin.toLowerCase()} hero wielding ${powerProfile} powers while carrying ${backgroundText.toLowerCase()}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "star wars rpg") {
     const archetype = getAnswerString(answers, "archetype", "Smuggler");
     const specialty = getAnswerString(answers, "specialty", "Piloting");
     const forceAffinity = getAnswerNumber(answers, "forceAffinity", 1);
-    return {
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1885,7 +2977,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         archetype,
         strain: 10 + forceAffinity,
         wounds: { current: 0, threshold: 11 + (archetype === "Soldier" ? 3 : 1) },
@@ -1896,7 +2990,7 @@ export function buildGeneratedCharacter(
         `${cleanName} is a ${archetype.toLowerCase()} with ${specialty.toLowerCase()} at the core of their survival, driven by ${backgroundText.toLowerCase()}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "legend of 5 rings 4e") {
@@ -1911,7 +3005,7 @@ export function buildGeneratedCharacter(
       void: 2,
     };
     rings[ringFocus as keyof typeof rings] = 3;
-    return {
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1920,7 +3014,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         clan,
         school,
         honor: school === "Courtier" ? 6.5 : 5,
@@ -1931,7 +3027,7 @@ export function buildGeneratedCharacter(
         `${cleanName} serves as a ${clan.toLowerCase()} ${school.toLowerCase()}, pulled between duty and ${backgroundText.toLowerCase()}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "vampire: the masqureade v5") {
@@ -1939,7 +3035,7 @@ export function buildGeneratedCharacter(
     const predatorType = getAnswerString(answers, "predatorType", "Alleycat");
     const humanity = getAnswerNumber(answers, "humanity", 6);
     const hunger = predatorType === "Alleycat" ? 2 : 1;
-    return {
+    return finalizeGeneratedCharacter({
       name: cleanName,
       role: "player",
       isMainCharacter: true,
@@ -1948,7 +3044,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         clan,
         predatorType,
         hunger,
@@ -1966,7 +3064,7 @@ export function buildGeneratedCharacter(
         `${cleanName} is a ${clan.toLowerCase()} ${predatorType.toLowerCase()} clinging to ${backgroundText.toLowerCase()}.`,
         personalityText,
       ),
-    };
+    });
   }
 
   if (normalizedRuleset === "call of cthulhu") {
@@ -1982,7 +3080,9 @@ export function buildGeneratedCharacter(
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
         ...(portraitDataUrl ? { portraitDataUrl } : {}),
-        personality: personalityText,
+          personality: personalityText,
+          age,
+          gender,
         occupation,
         hp: 8 + nerve,
         sanity: 45 + nerve * 3,
@@ -2004,7 +3104,7 @@ export function buildGeneratedCharacter(
     "Travel gear",
   );
   const startingSpell = getAnswerString(answers, "startingSpell", "None");
-  return {
+  return finalizeGeneratedCharacter({
     name: cleanName,
     role: "player",
     isMainCharacter: true,
@@ -2013,7 +3113,9 @@ export function buildGeneratedCharacter(
       background: backgroundText,
       physicalDescription: physicalDescriptionText,
       ...(portraitDataUrl ? { portraitDataUrl } : {}),
-      personality: personalityText,
+        personality: personalityText,
+        age,
+        gender,
       role,
       competence,
       startingEquipment,
@@ -2024,5 +3126,5 @@ export function buildGeneratedCharacter(
       `${cleanName} is a ${role.toLowerCase()} with solid fundamentals and a past shaped by ${backgroundText.toLowerCase()}.`,
       personalityText,
     ),
-  };
+  });
 }

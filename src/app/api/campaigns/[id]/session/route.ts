@@ -1,14 +1,28 @@
 import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { openai } from "@/lib/openai";
+import { deriveBehaviorSummary } from "@/lib/campaigns";
 import { extractSceneBlock, formatSceneBlock } from "@/lib/scene";
+import {
+  appendSceneImageHistory,
+  generateSceneMap,
+  normalizeSceneImageHistory,
+  normalizeSceneMapState,
+} from "@/lib/map";
+import {
+  applyPartyUpdate,
+  extractPartyBlock,
+  formatPartyBlock,
+  formatPartyStateForPrompt,
+  getNarrationLevelPromptInstruction,
+  normalizePartyState,
+} from "@/lib/party";
+import { DEFAULT_COMBAT_STATE } from "@/lib/combat";
+import { generateCampaignRecap } from "@/lib/recap";
 
 const PROMPT_HIDDEN_SHEET_KEYS = new Set([
   "source",
   "portraitDataUrl",
-]);
-
-const PROMPT_TRUNCATED_SHEET_KEYS = new Set([
   "background",
   "physicalDescription",
   "personality",
@@ -47,7 +61,15 @@ function formatCharacterSheet(sheetJson: unknown) {
     return "No saved sheet data.";
   }
 
-  const visibleEntries = Object.entries(sheetJson as Record<string, unknown>).filter(
+  const typedSheet = sheetJson as Record<string, unknown>;
+  const promptSheet = {
+    ...typedSheet,
+    behaviorSummary:
+      typeof typedSheet.behaviorSummary === "string" && typedSheet.behaviorSummary.trim()
+        ? typedSheet.behaviorSummary.trim()
+        : deriveBehaviorSummary(typedSheet),
+  };
+  const visibleEntries = Object.entries(promptSheet).filter(
     ([key]) => !PROMPT_HIDDEN_SHEET_KEYS.has(key),
   );
 
@@ -56,13 +78,7 @@ function formatCharacterSheet(sheetJson: unknown) {
   }
 
   return visibleEntries
-    .map(([key, value]) => {
-      if (PROMPT_TRUNCATED_SHEET_KEYS.has(key) && typeof value === "string") {
-        return `${key}: ${truncatePromptText(value, 160)}`;
-      }
-
-      return `${key}: ${formatValue(value)}`;
-    })
+    .map(([key, value]) => `${key}: ${formatValue(value)}`)
     .join("\n");
 }
 
@@ -96,6 +112,32 @@ function buildCharacterSummary(campaign: {
     .join("\n\n");
 }
 
+function clearTransientEffects(sheetJson: unknown) {
+  const currentSheet =
+    sheetJson && typeof sheetJson === "object" && !Array.isArray(sheetJson)
+      ? (sheetJson as Record<string, unknown>)
+      : {};
+
+  return {
+    ...currentSheet,
+    statusEffects: [],
+    temporaryBuffs: [],
+    temporaryDebuffs: [],
+  };
+}
+
+function clearResettablePartyState(partyStateJson: unknown) {
+  const currentPartyState = normalizePartyState(partyStateJson);
+
+  return {
+    ...currentPartyState,
+    recap: "",
+    activeQuests: [],
+    completedQuests: [],
+    journal: [],
+  };
+}
+
 export async function POST(req: NextRequest, context: RouteContext) {
   const { id } = await context.params;
   const body = await req.json();
@@ -116,23 +158,54 @@ export async function POST(req: NextRequest, context: RouteContext) {
   }
 
   const scenarioMessage = campaign.messages[0];
+  const narrationLevel = normalizePartyState(
+    (campaign as { partyStateJson?: unknown }).partyStateJson,
+  ).narrationLevel;
 
   if (!scenarioMessage) {
     return NextResponse.json({ error: "Scenario message not found" }, { status: 400 });
   }
 
   if (action === "reset") {
-    await prisma.message.deleteMany({
-      where: {
-        campaignId: id,
-        id: {
-          not: scenarioMessage.id,
+    const resetPartyState = clearResettablePartyState(
+      (campaign as { partyStateJson?: unknown }).partyStateJson,
+    );
+    const resetCharacters = await prisma.$transaction([
+      prisma.campaign.update({
+        where: { id },
+        data: {
+          partyStateJson: resetPartyState,
+          combatStateJson: DEFAULT_COMBAT_STATE,
+          mapStateJson: null,
+          sceneImageHistoryJson: null,
+        } as never,
+      }),
+      prisma.message.deleteMany({
+        where: {
+          campaignId: id,
+          id: {
+            not: scenarioMessage.id,
+          },
         },
-      },
-    });
+      }),
+      ...campaign.characters.map((character) =>
+        prisma.character.update({
+          where: { id: character.id },
+          data: {
+            sheetJson: clearTransientEffects(character.sheetJson),
+          },
+        }),
+      ),
+    ]);
+    const updatedCharacters = resetCharacters.slice(2);
 
     return NextResponse.json({
       messages: [scenarioMessage],
+      characters: updatedCharacters,
+      partyStateJson: resetPartyState,
+      combatStateJson: DEFAULT_COMBAT_STATE,
+      mapStateJson: null,
+      sceneImageHistoryJson: [],
       started: false,
     });
   }
@@ -163,8 +236,18 @@ export async function POST(req: NextRequest, context: RouteContext) {
           "Clock: <current urgency or timer>",
           "Context: <key NPCs, factions, or tags>",
           "ENDSCENE",
+          "After the scene block, include a hidden party-state block using this exact format:",
+          "PARTY:",
+          '{"activeQuests":["<active quest>"],"completedQuestsAdd":["<newly completed quest>"],"journalAdd":["<new journal entry>"],"reputation":[{"name":"<faction>","score":0,"status":"Neutral","notes":["<reputation note>"]}]}',
+          "ENDPARTY",
+          "This PARTY block is required on every response, even if no party values changed.",
+          "If no party state changed, return PARTY: {} ENDPARTY.",
+          "Allowed PARTY keys are partyName, summary, recap, activeQuests, completedQuests, completedQuestsAdd, journalAdd, reputation, and sharedInventory.",
+          "Reputation entries must be objects with name, score, status, and notes.",
+          getNarrationLevelPromptInstruction(narrationLevel),
+          "Narration level changes descriptive density only; it must not slow scene progression.",
           "Write one concise but flavorful opening narration that establishes immediate stakes.",
-          "End with four or five numbered options on separate lines using the format `1. ...`, `2. ...`, and so on.",
+          "End with exactly four numbered options on separate lines using the format `1. ...`, `2. ...`, and so on.",
           "Those options should be concrete actions, questions, or responses the player could plausibly choose next.",
           "Even when you provide numbered options, the player may still choose something else, so do not frame them as mandatory.",
         ].join(" "),
@@ -174,6 +257,11 @@ export async function POST(req: NextRequest, context: RouteContext) {
         content: [
           `Campaign title: ${campaign.title}`,
           `Campaign ruleset: ${campaign.ruleset}`,
+          "",
+          "Party state:",
+          formatPartyStateForPrompt(
+            (campaign as { partyStateJson?: unknown }).partyStateJson,
+          ),
           "",
           "Starting scenario:",
           scenarioMessage.content,
@@ -195,8 +283,9 @@ export async function POST(req: NextRequest, context: RouteContext) {
       goal: "Assess the situation",
       clock: "No visible timer",
       context: "Active scene",
-    })}\n\nGM:\n${scenarioMessage.content} The situation sharpens around the party.\n1. Press the issue\n2. Ask a question\n3. Take cover\n4. Read the room`;
+    })}\n\n${formatPartyBlock({})}\n\nGM:\n${scenarioMessage.content} The situation sharpens around the party.\n1. Press the issue\n2. Ask a question\n3. Take cover\n4. Read the room`;
   const extractedScene = extractSceneBlock(text);
+  const extractedParty = extractPartyBlock(extractedScene.content);
   const sceneBlock = formatSceneBlock(extractedScene.scene ?? {
     sceneTitle: campaign.title || "Opening Scene",
     location: "Current Area",
@@ -204,21 +293,75 @@ export async function POST(req: NextRequest, context: RouteContext) {
     threat: "Low Threat",
     goal: "Assess the situation",
     clock: "No visible timer",
-    context: "Active scene",
+      context: "Active scene",
   });
-  const visibleContent = extractedScene.content.replace(/^GM:\s*/i, "").trim();
+  const persistedPartyBlock = formatPartyBlock(extractedParty.update);
+  const visibleContent = extractedParty.content.replace(/^GM:\s*/i, "").trim();
+  const updatedPartyState = applyPartyUpdate(
+    (campaign as { partyStateJson?: unknown }).partyStateJson,
+    extractedParty.update,
+  );
+  const recappedPartyState = {
+    ...updatedPartyState,
+    recap: await generateCampaignRecap({
+      campaignTitle: campaign.title,
+      ruleset: campaign.ruleset,
+      partyState: updatedPartyState,
+      recentMessages: [
+        ...campaign.messages.map((message) => ({
+          speakerName: message.speakerName,
+          role: message.role,
+          content: message.content,
+        })),
+        {
+          speakerName: "GM",
+          role: "gm",
+          content: visibleContent,
+        },
+      ],
+    }),
+  };
 
-  const gmMessage = await prisma.message.create({
+  const [, gmMessage] = await prisma.$transaction([
+    prisma.campaign.update({
+      where: { id },
+      data: {
+        partyStateJson: recappedPartyState,
+      } as never,
+    }),
+    prisma.message.create({
+      data: {
+        campaignId: id,
+        speakerName: "GM",
+        role: "gm",
+        content: `${sceneBlock}\n\n${persistedPartyBlock}\n\n${visibleContent}`,
+      },
+    }),
+  ]);
+
+  const generatedMap = await generateSceneMap({
+    ruleset: campaign.ruleset,
+    campaignTitle: campaign.title,
+    latestGmContent: gmMessage.content,
+  });
+  const sceneImageHistory = appendSceneImageHistory(
+    (campaign as { sceneImageHistoryJson?: unknown }).sceneImageHistoryJson,
+    generatedMap,
+  );
+
+  await prisma.campaign.update({
+    where: { id },
     data: {
-      campaignId: id,
-      speakerName: "GM",
-      role: "gm",
-      content: `${sceneBlock}\n\n${visibleContent}`,
-    },
+      mapStateJson: generatedMap,
+      sceneImageHistoryJson: sceneImageHistory,
+    } as never,
   });
 
   return NextResponse.json({
     messages: [...campaign.messages, gmMessage],
+    partyStateJson: recappedPartyState,
+    mapStateJson: normalizeSceneMapState(generatedMap),
+    sceneImageHistoryJson: normalizeSceneImageHistory(sceneImageHistory),
     started: true,
   });
 }

@@ -27,6 +27,28 @@ function parseJsonObject(text: string) {
   }
 }
 
+function inferDeadlandsArchetype(
+  concept: string,
+  fallback = "Gunslinger",
+) {
+  const normalizedConcept = concept.toLowerCase();
+
+  if (/\bpreacher|priest|faith|holy|blessed\b/.test(normalizedConcept)) return "Blessed";
+  if (/\bhuckster|hex|card sharp|gambl|gamblin\b/.test(normalizedConcept)) return "Huckster";
+  if (/\btribal|spirit talk|medicine man|shaman\b/.test(normalizedConcept)) return "Shaman";
+  if (/\binventor|gizmo|mad science|scientist|contraption\b/.test(normalizedConcept)) return "Mad Scientist";
+  if (/\blaw|marshal|deputy|sheriff|lawman\b/.test(normalizedConcept)) return "Lawman";
+  if (/\bbounty hunter|tracker|hunt\b/.test(normalizedConcept)) return "Bounty Hunter";
+  if (/\bscout|trail|woodsman|ranger\b/.test(normalizedConcept)) return "Scout / Tracker";
+  if (/\bsoldier|cavalry|trooper|veteran\b/.test(normalizedConcept)) return "Soldier / Cavalry";
+  if (/\bprospector|miner|claim\b/.test(normalizedConcept)) return "Prospector";
+  if (/\bshowman|performer|entertainer|actor|singer\b/.test(normalizedConcept)) return "Showman / Entertainer";
+  if (/\bgambler|card\b/.test(normalizedConcept)) return "Gambler";
+  if (/\bgunslinger|quick draw|duelist|gunfighter\b/.test(normalizedConcept)) return "Gunslinger";
+
+  return fallback;
+}
+
 function getQuestionFallback(
   question: CharacterQuestion,
   currentAnswers: Record<string, string | number | null | undefined>,
@@ -110,6 +132,8 @@ function buildHeuristicSuggestions(
 ) {
   const normalizedConcept = concept.toLowerCase();
   const heuristicAnswers: Record<string, unknown> = {};
+  const isDeadlandsQuestionnaire = questions.some((question) => question.id === "deftness");
+  const inferredDeadlandsArchetype = inferDeadlandsArchetype(concept, "Gunslinger");
 
   for (const question of questions) {
     if (question.kind === "select" && question.options) {
@@ -122,18 +146,173 @@ function buildHeuristicSuggestions(
         continue;
       }
 
-      if (question.id === "weapon") {
+      if (isDeadlandsQuestionnaire) {
+        if (question.id === "archetype") {
+          heuristicAnswers[question.id] = inferredDeadlandsArchetype;
+          continue;
+        }
+
+        if (question.id === "edgeOne") {
+          heuristicAnswers[question.id] =
+            ["Blessed", "Huckster", "Shaman", "Mad Scientist"].includes(
+              inferredDeadlandsArchetype,
+            )
+              ? "Arcane Background"
+              : inferredDeadlandsArchetype === "Gunslinger"
+                ? "Quick Draw"
+                : inferredDeadlandsArchetype === "Lawman"
+                  ? "Keen"
+                  : "Hard to Kill";
+          continue;
+        }
+
+        if (question.id === "edgeTwo") {
+          heuristicAnswers[question.id] =
+            inferredDeadlandsArchetype === "Gunslinger" ? "Level Headed" : "None";
+          continue;
+        }
+
+        if (question.id === "hindranceOne") {
+          heuristicAnswers[question.id] = /\bwanted|outlaw|fugitive\b/.test(normalizedConcept)
+            ? "Wanted"
+            : /\bvengeful|revenge\b/.test(normalizedConcept)
+              ? "Vengeful"
+              : "Enemy";
+          continue;
+        }
+
+        if (question.id === "hindranceTwo") {
+          heuristicAnswers[question.id] = "None";
+          continue;
+        }
+
+        if (question.id === "primarySkill") {
+          heuristicAnswers[question.id] =
+            inferredDeadlandsArchetype === "Blessed"
+              ? "Faith"
+              : inferredDeadlandsArchetype === "Huckster"
+                ? "Hexslingin'"
+                : inferredDeadlandsArchetype === "Mad Scientist"
+                  ? "Mad Science"
+                  : inferredDeadlandsArchetype === "Scout / Tracker"
+                    ? "Tracking"
+                    : "Shootin'";
+          continue;
+        }
+
+        if (question.id === "secondarySkill") {
+          heuristicAnswers[question.id] =
+            inferredDeadlandsArchetype === "Blessed"
+              ? "Guts"
+              : inferredDeadlandsArchetype === "Huckster"
+                ? "Scrutinize"
+                : inferredDeadlandsArchetype === "Mad Scientist"
+                  ? "Knowledge"
+                  : "Dodge";
+          continue;
+        }
+
+        if (question.id === "mainHand") {
+          heuristicAnswers[question.id] =
+            inferredDeadlandsArchetype === "Gunslinger" || inferredDeadlandsArchetype === "Lawman"
+              ? "Colt Peacemaker"
+              : inferredDeadlandsArchetype === "Scout / Tracker"
+                ? "Bow Knife"
+                : "Schofield Revolver";
+          continue;
+        }
+
+        if (question.id === "offHand") {
+          heuristicAnswers[question.id] = /\bdual|two[- ]?gun|two[- ]?weapon\b/.test(
+            normalizedConcept,
+          )
+            ? "Derringer"
+            : "None";
+          continue;
+        }
+
+        if (question.id === "longarm") {
+          heuristicAnswers[question.id] =
+            inferredDeadlandsArchetype === "Soldier / Cavalry" ||
+            inferredDeadlandsArchetype === "Bounty Hunter"
+              ? "Winchester Rifle"
+              : inferredDeadlandsArchetype === "Scout / Tracker"
+                ? "Hunting Rifle"
+                : "None";
+          continue;
+        }
+
+        if (question.id === "blessedMiracleOne" && inferredDeadlandsArchetype === "Blessed") {
+          heuristicAnswers[question.id] = "Smite";
+          continue;
+        }
+
+        if (question.id === "hucksterHexOne" && inferredDeadlandsArchetype === "Huckster") {
+          heuristicAnswers[question.id] = "Soul Blast";
+          continue;
+        }
+
+        if (question.id === "shamanFavorOne" && inferredDeadlandsArchetype === "Shaman") {
+          heuristicAnswers[question.id] = "Spirit Warrior";
+          continue;
+        }
+
+        if (
+          question.id === "madScienceInventionOne" &&
+          inferredDeadlandsArchetype === "Mad Scientist"
+        ) {
+          heuristicAnswers[question.id] = "Electrostatic Projector";
+          continue;
+        }
+      }
+
+      if (question.id === "mainHand") {
         if (
           /\b(two[- ]handed|greatsword|big sword|large sword|huge sword)\b/.test(
             normalizedConcept,
           )
         ) {
-          heuristicAnswers[question.id] = "Greataxe";
+          heuristicAnswers[question.id] = "Greatsword";
           continue;
         }
 
         if (/\bbow|archer|ranged\b/.test(normalizedConcept)) {
-          heuristicAnswers[question.id] = "Longbow";
+          heuristicAnswers[question.id] = "Longsword";
+          continue;
+        }
+      }
+
+      if (question.id === "offHand") {
+        if (
+          /\b(two|dual|twin)[- ]?(weapon|wield|wields|sword|swords|blade|blades)\b|\btwo long swords\b|\bdual wield\b/.test(
+            normalizedConcept,
+          )
+        ) {
+          heuristicAnswers[question.id] = "Shortsword";
+          continue;
+        }
+
+        heuristicAnswers[question.id] = "None";
+        continue;
+      }
+
+      if (question.id === "rangedWeapon" && /\bbow|archer|ranged\b/.test(normalizedConcept)) {
+        heuristicAnswers[question.id] = "Longbow";
+        continue;
+      }
+
+      if (question.id === "shieldEquipped") {
+        if (
+          /\b(two|dual|twin)[- ]?(weapon|wield|wields|sword|swords|blade|blades)\b|\btwo long swords\b|\bdual wield\b/.test(
+            normalizedConcept,
+          )
+        ) {
+          heuristicAnswers[question.id] = "No";
+          continue;
+        }
+
+        if (/\btank|shield|defen[cs]e|protector\b/.test(normalizedConcept)) {
+          heuristicAnswers[question.id] = "Yes";
           continue;
         }
       }
@@ -152,6 +331,86 @@ function buildHeuristicSuggestions(
     }
 
     if (question.kind === "number") {
+      if (
+        [
+          "deftness",
+          "nimbleness",
+          "quickness",
+          "strength",
+          "vigor",
+          "cognition",
+          "knowledge",
+          "mien",
+          "smarts",
+          "spirit",
+        ].includes(question.id)
+      ) {
+        const skillLean = /\bquick|agile|quiet|fast\b/.test(normalizedConcept)
+          ? ["nimbleness", "quickness"]
+          : /\bstrong|tough|brawler\b/.test(normalizedConcept)
+            ? ["strength", "vigor"]
+            : /\bsmart|cunning|book|scientist\b/.test(normalizedConcept)
+              ? ["knowledge", "smarts"]
+              : /\bwatchful|tracker|scout\b/.test(normalizedConcept)
+                ? ["cognition", "knowledge"]
+                : [];
+
+        heuristicAnswers[question.id] = Math.min(
+          question.max ?? 5,
+          Math.max(
+            question.min ?? 1,
+            skillLean.includes(question.id) ? 4 : 3,
+          ),
+        );
+        continue;
+      }
+
+      if (question.id === "guts") {
+        heuristicAnswers[question.id] = /\bgrim|fearless|hardened|veteran\b/.test(normalizedConcept)
+          ? Math.min(question.max ?? 5, 4)
+          : Math.min(question.max ?? 5, 3);
+        continue;
+      }
+
+      if (question.id === "arcanePool") {
+        heuristicAnswers[question.id] = /\bpowerful|gifted|veteran\b/.test(normalizedConcept)
+          ? Math.min(question.max ?? 10, 4)
+          : Math.min(question.max ?? 10, 3);
+        continue;
+      }
+
+      if (
+        [
+          "woundHead",
+          "woundGuts",
+          "woundLeftArm",
+          "woundRightArm",
+          "woundLeftLeg",
+          "woundRightLeg",
+        ].includes(question.id)
+      ) {
+        const defaultWound =
+          question.id === "woundGuts" && /\bwounded|injured|hurt|gut shot\b/.test(normalizedConcept)
+            ? 1
+            : 0;
+        heuristicAnswers[question.id] = 0;
+        if (defaultWound > 0) {
+          heuristicAnswers[question.id] = defaultWound;
+        }
+        continue;
+      }
+
+      if (["fateWhite", "fateRed", "fateBlue", "fateLegend"].includes(question.id)) {
+        if (question.id === "fateWhite") {
+          heuristicAnswers[question.id] = 2;
+        } else if (question.id === "fateRed") {
+          heuristicAnswers[question.id] = 1;
+        } else {
+          heuristicAnswers[question.id] = 0;
+        }
+        continue;
+      }
+
       if (question.id === "str" && /\bstrong|powerful|muscular|brute\b/.test(normalizedConcept)) {
         heuristicAnswers[question.id] = Math.min(question.max ?? 18, 16);
         continue;

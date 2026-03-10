@@ -6,7 +6,11 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "test:combat": "tsx --test src/lib/__tests__/combat-engine.test.ts",
+    "test:coach": "tsx --test src/lib/__tests__/character-coach.test.ts",
+    "test:campaign": "tsx --test src/lib/__tests__/campaign-characters.test.ts",
+    "test:lib": "pnpm test:combat && pnpm test:coach && pnpm test:campaign"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.4.2",

@@ -16,6 +16,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { useParams } from "next/navigation";
 import { LibraryCharacterBuilder } from "@/components/LibraryCharacterBuilder";
+import { DebugInspectorModal } from "@/components/DebugInspectorModal";
 import {
   DEFAULT_SCENE_SUMMARY,
   extractSceneBlock,
@@ -64,12 +65,20 @@ import {
   type ProgressionState,
 } from "@/lib/progression";
 import { upsertMainCharacter } from "@/lib/campaign-characters";
+import { type CampaignBootstrapPlayerView } from "@/lib/campaign-bootstrap";
+import { extractCampaignBootstrapBlock } from "@/lib/campaign-bootstrap-reducer";
+import {
+  decodeEscapedNewlines,
+  normalizeChoiceTextForDisplay,
+} from "@/lib/chat-display";
+import { useBootstrapDebugTools } from "@/hooks/useBootstrapDebugTools";
 
 type ChatMessage = {
   id?: string;
   speakerName: string;
   role: string;
   content: string;
+  isEnemyNarration?: boolean;
 };
 
 type CampaignCharacter = {
@@ -99,6 +108,7 @@ type CampaignDetails = {
   title: string;
   ruleset: string;
   chatModel: CampaignChatModel;
+  bootstrapPublicJson: CampaignBootstrapPlayerView | null;
   progressionStateJson: ProgressionState;
   progressionEventsJson: ProgressionEvent[];
   partyStateJson: PartyState;
@@ -109,6 +119,19 @@ type CampaignDetails = {
   sceneImageHistoryJson: SceneImageHistoryEntry[];
   characters: CampaignCharacter[];
 };
+
+function normalizeBootstrapPublicView(value: unknown): CampaignBootstrapPlayerView | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+
+  const typedValue = value as Record<string, unknown>;
+  if (!typedValue.campaign || typeof typedValue.campaign !== "object") {
+    return null;
+  }
+
+  return value as CampaignBootstrapPlayerView;
+}
 
 type PartyStateDraft = {
   narrationLevel: NarrationLevel;
@@ -295,12 +318,13 @@ type CombatActionKind =
   | "attempt-escape"
   | "pass";
 
-type SceneImagePromptType = "scene" | "portrait" | "character" | "action";
+type SceneImagePromptType = "scene" | "portrait" | "character" | "action" | "character-token";
 type SceneImageAspectRatio = "landscape" | "portrait" | "square";
 type SceneImageTypeFilter = "all" | SceneImagePromptType;
 type SceneImageStylePreset =
   | "cinematic-realism"
   | "fantasy-illustration"
+  | "stone-base"
   | "comic-book"
   | "manga"
   | "stylized-3d"
@@ -337,10 +361,7 @@ export default function CampaignPage() {
   const [campaignError, setCampaignError] = useState("");
   const [collapsedCards, setCollapsedCards] = useState<Record<string, boolean>>({});
   const [detailCardId, setDetailCardId] = useState("");
-  const [scenarioDraft, setScenarioDraft] = useState("");
-  const [isScenarioActive, setIsScenarioActive] = useState(false);
   const [isTogglingScenario, setIsTogglingScenario] = useState(false);
-  const [isSavingScenario, setIsSavingScenario] = useState(false);
   const [isResyncingState, setIsResyncingState] = useState(false);
   const [isUndoingTurn, setIsUndoingTurn] = useState(false);
   const [debugStateLoggingEnabled, setDebugStateLoggingEnabled] = useState(false);
@@ -400,6 +421,7 @@ export default function CampaignPage() {
   const [sceneImageAspectRatio, setSceneImageAspectRatio] =
     useState<SceneImageAspectRatio>("landscape");
   const [sceneImageSeedInput, setSceneImageSeedInput] = useState("");
+  const [isCombinedPromptHidden, setIsCombinedPromptHidden] = useState(true);
   const [isGeneratingWorldMap, setIsGeneratingWorldMap] = useState(false);
   const [isSavingWorldMap, setIsSavingWorldMap] = useState(false);
   const [isSavingWorldMapTitle, setIsSavingWorldMapTitle] = useState(false);
@@ -444,10 +466,6 @@ export default function CampaignPage() {
   const chatScrollContainerRef = useRef<HTMLDivElement | null>(null);
   const [followChatLive, setFollowChatLive] = useState(true);
   const [chatAutoScrollPaused, setChatAutoScrollPaused] = useState(false);
-  const [combatLogFilter, setCombatLogFilter] = useState<"all" | "player" | "enemy" | "rules">(
-    "all",
-  );
-  const [showCombatLogInline, setShowCombatLogInline] = useState(true);
   const [showLastResolutionDetails, setShowLastResolutionDetails] = useState(false);
   const [lastCombatResolution, setLastCombatResolution] = useState<{
     narration: string;
@@ -476,6 +494,27 @@ export default function CampaignPage() {
     x: number;
     y: number;
   } | null>(null);
+
+  const {
+    debugBootstrapState,
+    isLoadingDebugBootstrapState,
+    isApplyingDebugBootstrapAction,
+    loadDebugBootstrapState,
+    applyDebugBootstrapAction,
+  } = useBootstrapDebugTools({
+    campaignId,
+    onPublicBootstrapUpdate: (publicView) => {
+      setCampaign((currentCampaign) =>
+        currentCampaign
+          ? {
+              ...currentCampaign,
+              bootstrapPublicJson: normalizeBootstrapPublicView(publicView),
+            }
+          : currentCampaign,
+      );
+    },
+    onError: (message) => setError(message),
+  });
 
   useEffect(() => {
     try {
@@ -534,6 +573,9 @@ export default function CampaignPage() {
         if (campaignData.campaign) {
           setCampaign({
             ...campaignData.campaign,
+            bootstrapPublicJson: normalizeBootstrapPublicView(
+              campaignData.campaign.bootstrapPublicJson,
+            ),
             chatModel:
               campaignData.campaign.chatModel ?? DEFAULT_CAMPAIGN_CHAT_MODEL,
             progressionStateJson:
@@ -571,15 +613,6 @@ export default function CampaignPage() {
             messagesData.messages.length > 0
           ) {
             setMessages(messagesData.messages);
-            const firstMessage = messagesData.messages[0];
-            if (
-              firstMessage &&
-              firstMessage.role === "gm" &&
-              typeof firstMessage.content === "string"
-            ) {
-              setScenarioDraft(firstMessage.content);
-            }
-            setIsScenarioActive(messagesData.messages.length > 1);
           }
         }
       } catch {
@@ -589,6 +622,13 @@ export default function CampaignPage() {
 
     loadCampaign();
   }, [campaignId]);
+
+  useEffect(() => {
+    if (!isDebugInspectorOpen || !debugStateLoggingEnabled || !campaignId) {
+      return;
+    }
+    void loadDebugBootstrapState();
+  }, [campaignId, debugStateLoggingEnabled, isDebugInspectorOpen, loadDebugBootstrapState]);
 
   useEffect(() => {
     if (!campaign?.partyStateJson) {
@@ -670,18 +710,6 @@ export default function CampaignPage() {
   }, [campaign?.worldMapHistoryJson?.length]);
 
   useEffect(() => {
-    if (isScenarioActive) {
-      return;
-    }
-
-    const firstMessage = messages[0];
-
-    if (firstMessage && firstMessage.role === "gm") {
-      setScenarioDraft(firstMessage.content);
-    }
-  }, [isScenarioActive, messages]);
-
-  useEffect(() => {
     const characters = campaign?.characters ?? [];
     if (characters.length <= 0) {
       setSceneImageCharacterId("");
@@ -701,6 +729,13 @@ export default function CampaignPage() {
       getSceneImageInstructionTemplate(sceneImagePromptType, campaign?.ruleset ?? "D&D 5e"),
     );
   }, [sceneImagePromptType, campaign?.ruleset]);
+
+  useEffect(() => {
+    if (sceneImagePromptType === "character-token") {
+      setSceneImageAspectRatio("square");
+      setSceneImageStylePreset("stone-base");
+    }
+  }, [sceneImagePromptType]);
 
   useEffect(() => {
     setSceneImageStyleDescription(
@@ -845,9 +880,21 @@ export default function CampaignPage() {
   const companionColorMap = buildCompanionColorMap(companionCharacters);
   const needsCharacterGeneration = !mainCharacter;
   const isDevBuild = process.env.NODE_ENV !== "production";
-  const isChatLocked = needsCharacterGeneration || !isScenarioActive;
+  const isChatLocked = needsCharacterGeneration;
   const canUndoLastTurn = messages.some((message) => message.role === "user");
   const campaignRuleset = campaign?.ruleset ?? "";
+  const bootstrapPublic = campaign?.bootstrapPublicJson ?? null;
+  const bootstrapObjective =
+    bootstrapPublic?.campaign.party_goal_public?.trim() ?? "";
+  const bootstrapKnownQuests = (bootstrapPublic?.quests ?? []).filter(
+    (quest) => quest.visibility === "player",
+  );
+  const bootstrapRumorQuests = (bootstrapPublic?.quests ?? []).filter(
+    (quest) => quest.visibility === "teased",
+  );
+  const bootstrapVisibleClocks = bootstrapPublic?.clocks ?? [];
+  const bootstrapRevealedClues = bootstrapPublic?.clues ?? [];
+  const bootstrapExpansionEvents = bootstrapPublic?.expansion_events ?? [];
   const sceneSummary = buildSceneSummary(campaign, messages);
   const sceneImageHistory = campaign?.sceneImageHistoryJson ?? [];
   const filteredSceneImageHistory = sceneImageHistory.filter((image) => {
@@ -1069,16 +1116,6 @@ export default function CampaignPage() {
     selectedCombatAttackPreset,
     selectedCombatSpellConsumesSlot,
   ]);
-  const filteredCombatLogEntries = useMemo(
-    () =>
-      combatEngineLogEntries.filter((entry) => {
-        if (combatLogFilter === "all") {
-          return true;
-        }
-        return getCombatLogCategory(entry.text) === combatLogFilter;
-      }),
-    [combatEngineLogEntries, combatLogFilter],
-  );
   const reactionElapsedSeconds = (() => {
     void reactionTicker;
     return pendingReactionSince
@@ -1405,6 +1442,32 @@ export default function CampaignPage() {
     });
   }
 
+  function resolveEngineActionSpeaker(
+    actorRef: string | undefined,
+    fallbackName?: string,
+  ): Pick<ChatMessage, "speakerName" | "role" | "isEnemyNarration"> {
+    const byId = actorRef ? characterMapById.get(actorRef) : null;
+    const byName = actorRef
+      ? characterMapByName.get(normalizeCharacterLookupName(actorRef))
+      : null;
+    const actorCharacter = byId ?? byName ?? null;
+
+    if (actorCharacter) {
+      return {
+        speakerName: actorCharacter.name,
+        role: actorCharacter.isMainCharacter ? "user" : "companion",
+        isEnemyNarration: false,
+      };
+    }
+
+    const speakerName = (fallbackName ?? actorRef ?? "GM").trim() || "GM";
+    return {
+      speakerName,
+      role: "gm",
+      isEnemyNarration: true,
+    };
+  }
+
   async function runEngineAutoTurns(startState: CombatState) {
     if (!campaignId || !engineCombatModeEnabled || !startState.combatActive) {
       return startState;
@@ -1565,14 +1628,17 @@ export default function CampaignPage() {
               }
             : currentCampaign,
         );
+        const speaker = resolveEngineActionSpeaker(
+          typeof typedResolution.actor === "string" ? typedResolution.actor : undefined,
+          activeEntry.name,
+        );
         setMessages((prev) => [
           ...prev,
           {
-            speakerName: "GM",
-            role: "gm",
-            content: `Combat Engine: ${buildCombatEngineResolutionNarration(
-              typedResolution,
-            )}`,
+            speakerName: speaker.speakerName,
+            role: speaker.role,
+            content: buildCombatEngineResolutionNarration(typedResolution),
+            isEnemyNarration: speaker.isEnemyNarration,
           },
         ]);
         setCombatEngineLogEntries((current) => [
@@ -1752,9 +1818,20 @@ export default function CampaignPage() {
                       : params.kind === "surrender"
                         ? "Surrender and end hostilities."
           : "Hold position and pass.";
+    const actorCharacter =
+      (activeEntry.id ? characterMapById.get(activeEntry.id) : null) ??
+      characterMapByName.get(normalizeCharacterLookupName(activeEntry.name)) ??
+      null;
+    const actorIsMainCharacter = Boolean(actorCharacter?.isMainCharacter);
+    const actorMessageRole: ChatMessage["role"] =
+      activeEntry.type === "character"
+        ? actorIsMainCharacter
+          ? "user"
+          : "companion"
+        : "gm";
     const userMessage: ChatMessage = {
-      speakerName: mainCharacter?.name ?? "Player",
-      role: "user",
+      speakerName: activeEntry.name || actorCharacter?.name || mainCharacter?.name || "Player",
+      role: actorMessageRole,
       content: params.userMessageContent ?? defaultUserMessage,
     };
     setMessages((prev) => [...prev, userMessage]);
@@ -1859,12 +1936,17 @@ export default function CampaignPage() {
           : currentCampaign,
       );
 
+      const speaker = resolveEngineActionSpeaker(
+        typeof typedResolution.actor === "string" ? typedResolution.actor : undefined,
+        activeEntry.name,
+      );
       setMessages((prev) => [
         ...prev,
         {
-          speakerName: "GM",
-          role: "gm",
-          content: `Combat Engine: ${resolutionNarration}`,
+          speakerName: speaker.speakerName,
+          role: speaker.role,
+          content: resolutionNarration,
+          isEnemyNarration: speaker.isEnemyNarration,
         },
       ]);
       setCombatEngineLogEntries((current) => [
@@ -1979,12 +2061,16 @@ export default function CampaignPage() {
           : currentCampaign,
       );
 
+      const speaker = resolveEngineActionSpeaker(
+        typeof typedResolution.actor === "string" ? typedResolution.actor : undefined,
+      );
       setMessages((prev) => [
         ...prev,
         {
-          speakerName: "GM",
-          role: "gm",
-          content: `Combat Engine: ${resolutionNarration}`,
+          speakerName: speaker.speakerName,
+          role: speaker.role,
+          content: resolutionNarration,
+          isEnemyNarration: speaker.isEnemyNarration,
         },
       ]);
       setCombatEngineLogEntries((current) => [
@@ -2265,6 +2351,10 @@ export default function CampaignPage() {
                 Array.isArray(chatData.sceneImageHistoryJson)
                   ? (chatData.sceneImageHistoryJson as SceneImageHistoryEntry[])
                   : currentCampaign.sceneImageHistoryJson,
+              bootstrapPublicJson:
+                "bootstrapPublicJson" in chatData
+                  ? normalizeBootstrapPublicView(chatData.bootstrapPublicJson)
+                  : currentCampaign.bootstrapPublicJson,
               characters: Array.isArray(chatData.characters)
                 ? (chatData.characters as CampaignCharacter[])
                 : currentCampaign.characters,
@@ -2298,14 +2388,6 @@ export default function CampaignPage() {
       handoffMessage,
       requireActiveEngineCombat: false,
       appendPlayerMessage: false,
-    });
-  }
-
-  async function handleEndEngineCombatAndHandoff() {
-    await endEngineCombatAndHandoff({
-      handoffMessage: "Combat has ended. Narrate the immediate aftermath and next choices.",
-      requireActiveEngineCombat: true,
-      appendPlayerMessage: true,
     });
   }
 
@@ -2393,6 +2475,10 @@ export default function CampaignPage() {
                     Array.isArray(data.sceneImageHistoryJson)
                       ? (data.sceneImageHistoryJson as SceneImageHistoryEntry[])
                       : currentCampaign.sceneImageHistoryJson,
+                  bootstrapPublicJson:
+                    "bootstrapPublicJson" in data
+                      ? normalizeBootstrapPublicView(data.bootstrapPublicJson)
+                      : currentCampaign.bootstrapPublicJson,
                 }
               : currentCampaign,
           );
@@ -2422,6 +2508,10 @@ export default function CampaignPage() {
                     Array.isArray(data.sceneImageHistoryJson)
                       ? (data.sceneImageHistoryJson as SceneImageHistoryEntry[])
                       : currentCampaign.sceneImageHistoryJson,
+                  bootstrapPublicJson:
+                    "bootstrapPublicJson" in data
+                      ? normalizeBootstrapPublicView(data.bootstrapPublicJson)
+                      : currentCampaign.bootstrapPublicJson,
                 }
               : currentCampaign,
           );
@@ -2537,7 +2627,9 @@ export default function CampaignPage() {
                 {
                   speakerName: "GM",
                   role: "gm",
-                  content: `INITIATIVE\n\n${formattedInitiativeLines.join("\n\n")}`,
+                  content: `INITIATIVE\n${formattedInitiativeLines
+                    .map((line) => `- ${line}`)
+                    .join("\n")}`,
                 },
               ]);
             }
@@ -2570,94 +2662,19 @@ export default function CampaignPage() {
   }
 
   async function handleScenarioAction() {
-    if (!campaignId || needsCharacterGeneration || isTogglingScenario || isSavingScenario) {
+    if (!campaignId || needsCharacterGeneration || isTogglingScenario) {
       return;
     }
 
     setIsUtilityMenuOpen(false);
 
-    if (isScenarioActive) {
-      setConfirmationState({
-        kind: "reset",
-        title: "Confirmation",
-        message: "Reset the scenario and clear chat history after the opening scene?",
-        confirmLabel: "Reset",
-      });
-      return;
-    }
-
-    if (!scenarioDraft.trim()) {
-      setError("The starting scenario cannot be blank.");
-      return;
-    }
-
-    const saved = await saveScenarioDraft();
-
-    if (!saved) {
-      return;
-    }
-
-    await performScenarioAction();
-  }
-
-  async function saveScenarioDraft() {
-    const trimmedScenario = scenarioDraft.trim();
-
-    if (!campaignId) {
-      return false;
-    }
-
-    if (!trimmedScenario) {
-      setError("The starting scenario cannot be blank.");
-      return false;
-    }
-
-    const firstMessage = messages[0];
-
-    if (
-      firstMessage &&
-      firstMessage.role === "gm" &&
-      firstMessage.content.trim() === trimmedScenario
-    ) {
-      return true;
-    }
-
-    setError("");
-    setIsSavingScenario(true);
-
-    try {
-      const res = await fetch(`/api/campaigns/${campaignId}`, {
-        method: "PATCH",
-        headers: {
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          startingScenario: trimmedScenario,
-        }),
-      });
-      const data = await res.json();
-
-      if (!res.ok || !data.message) {
-        throw new Error(data.error ?? "Unable to update the starting scenario.");
-      }
-
-      setMessages((currentMessages) =>
-        currentMessages.length === 0
-          ? currentMessages
-          : [data.message, ...currentMessages.slice(1)],
-      );
-      setScenarioDraft(data.message.content);
-      return true;
-    } catch (scenarioError) {
-      setError(
-        scenarioError instanceof Error
-          ? scenarioError.message
-          : "Unable to update the starting scenario.",
-      );
-      return false;
-    } finally {
-      setIsSavingScenario(false);
-    }
+    setConfirmationState({
+      kind: "reset",
+      title: "Confirmation",
+      message: "Reset the scenario and clear chat history after the opening scene?",
+      confirmLabel: "Reset",
+    });
+    return;
   }
 
   async function performScenarioAction() {
@@ -2675,7 +2692,7 @@ export default function CampaignPage() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          action: isScenarioActive ? "reset" : "start",
+          action: "reset",
         }),
       });
 
@@ -2752,7 +2769,6 @@ export default function CampaignPage() {
               : currentCampaign,
           );
         }
-      setIsScenarioActive(Boolean(data.started));
       setInput("");
     } catch (scenarioError) {
       setError(
@@ -2855,7 +2871,6 @@ export default function CampaignPage() {
             }
           : currentCampaign,
       );
-      setIsScenarioActive(nextMessages.length > 1);
       setDetailCardId((currentDetailCardId) =>
         nextCharacters.some((character) => character.id === currentDetailCardId)
           ? currentDetailCardId
@@ -4653,90 +4668,52 @@ export default function CampaignPage() {
         </div>
       ) : null}
 
-      {isDebugInspectorOpen && debugStateLoggingEnabled ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 px-4">
-          <div className="w-full max-w-3xl rounded-2xl border border-zinc-700 bg-zinc-900 p-5 shadow-2xl">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <div className="text-sm font-semibold uppercase tracking-[0.18em] text-amber-200">
-                  Debug Inspector
-                </div>
-                <p className="mt-1 text-xs text-zinc-400">
-                  Session-only view of the last parsed structured GM blocks.
-                </p>
-              </div>
-              <button
-                type="button"
-                onClick={() => setIsDebugInspectorOpen(false)}
-                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-200"
-              >
-                Close
-              </button>
-            </div>
+      <DebugInspectorModal
+        isOpen={isDebugInspectorOpen}
+        debugEnabled={debugStateLoggingEnabled}
+        onClose={() => setIsDebugInspectorOpen(false)}
+        debugSnapshot={debugSnapshot}
+        combatEngineLogEntries={combatEngineLogEntries}
+        combatTraceEntries={combatTraceEntries}
+        debugBootstrapState={debugBootstrapState}
+        isLoadingDebugBootstrapState={isLoadingDebugBootstrapState}
+        isApplyingDebugBootstrapAction={isApplyingDebugBootstrapAction}
+        onRefreshBootstrap={() => void loadDebugBootstrapState()}
+        onAdvanceClock={(clockId) =>
+          void applyDebugBootstrapAction(
+            { action: "advance-clock", clockId, delta: 1 },
+            "Unable to advance clock.",
+          )
+        }
+        onRevealQuest={(questId) =>
+          void applyDebugBootstrapAction(
+            { action: "reveal-quest", questId },
+            "Unable to reveal quest.",
+          )
+        }
+        onRevealClue={(clueId) =>
+          void applyDebugBootstrapAction(
+            { action: "reveal-clue", clueId },
+            "Unable to reveal clue.",
+          )
+        }
+        onSetCombatGeneration={(params) =>
+          void applyDebugBootstrapAction(
+            {
+              action: "set-combat-generation",
+              ...(params.difficultyMode
+                ? { difficultyMode: params.difficultyMode }
+                : {}),
+              ...(params.encounterVariance
+                ? { encounterVariance: params.encounterVariance }
+                : {}),
+            },
+            "Unable to update combat generation presets.",
+          )
+        }
+      />
 
-            {debugSnapshot ? (
-              <div className="mt-4 grid gap-4 md:grid-cols-2">
-                <DebugPanel
-                  title="SCENE"
-                  content={JSON.stringify(debugSnapshot.scene, null, 2)}
-                />
-                <DebugPanel
-                  title="COMBAT"
-                  content={JSON.stringify(debugSnapshot.combatUpdate, null, 2)}
-                />
-                <DebugPanel
-                  title="STATE"
-                  content={JSON.stringify(debugSnapshot.stateUpdates, null, 2)}
-                />
-                <DebugPanel
-                  title="PARTY"
-                  content={JSON.stringify(debugSnapshot.partyUpdate, null, 2)}
-                />
-                <DebugPanel
-                  title="ENGINE LOG"
-                  content={
-                    combatEngineLogEntries.length > 0
-                      ? combatEngineLogEntries.map((entry) => entry.text).join("\n")
-                      : "No engine log entries yet."
-                  }
-                />
-                <DebugPanel
-                  title="ENGINE TRACE"
-                  content={
-                    combatTraceEntries.length > 0
-                      ? JSON.stringify(combatTraceEntries, null, 2)
-                      : "No engine trace entries yet."
-                  }
-                />
-              </div>
-            ) : (
-              <div className="mt-4 space-y-4">
-                <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-4 text-sm text-zinc-400">
-                  No debug snapshot yet. Send a GM turn while Debug On is enabled.
-                </div>
-                <DebugPanel
-                  title="ENGINE LOG"
-                  content={
-                    combatEngineLogEntries.length > 0
-                      ? combatEngineLogEntries.map((entry) => entry.text).join("\n")
-                      : "No engine log entries yet."
-                  }
-                />
-                <DebugPanel
-                  title="ENGINE TRACE"
-                  content={
-                    combatTraceEntries.length > 0
-                      ? JSON.stringify(combatTraceEntries, null, 2)
-                      : "No engine trace entries yet."
-                  }
-                />
-              </div>
-            )}
-          </div>
-        </div>
-      ) : null}
-
-      <div className="mx-auto grid max-w-7xl gap-4 overflow-x-hidden xl:grid-cols-[minmax(0,1fr)_minmax(360px,450px)] 2xl:grid-cols-[minmax(0,1fr)_minmax(440px,540px)]">
+      <div className="mx-auto grid max-w-[98.75rem] gap-4 overflow-x-hidden xl:grid-cols-[minmax(0,1fr)_minmax(260px,350px)] 2xl:grid-cols-[minmax(0,1fr)_minmax(340px,440px)]">
         <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3 shadow">
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
@@ -4810,8 +4787,26 @@ export default function CampaignPage() {
           ) : null}
 
           <section className="mb-3 rounded-xl border border-zinc-800 bg-zinc-950/80 p-3.5">
-            <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
-              Scene
+            <div className="flex items-center justify-between gap-2">
+              <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
+                Scene
+              </div>
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <span
+                  className={`rounded-full px-2 py-0.5 font-medium ${getMoodBadgeClass(
+                    sceneSummary.mood,
+                  )}`}
+                >
+                  Mood: {sceneSummary.mood}
+                </span>
+                <span
+                  className={`rounded-full px-2 py-0.5 font-medium ${getThreatBadgeClass(
+                    sceneSummary.threat,
+                  )}`}
+                >
+                  Threat: {sceneSummary.threat}
+                </span>
+              </div>
             </div>
             <div className="mt-2 hidden text-sm text-zinc-100">
               <span className="font-semibold">
@@ -4839,14 +4834,6 @@ export default function CampaignPage() {
                   <span className="font-medium text-emerald-300/80">Goal:</span>{" "}
                   {sceneSummary.goal}
                 </span>
-                <span className="text-zinc-600">|</span>
-                <span
-                  className={`rounded-full px-2 py-0.5 text-xs font-medium ${getClockBadgeClass(
-                    sceneSummary.clock,
-                  )}`}
-                >
-                  <span className="font-medium">Clock:</span> {sceneSummary.clock}
-                </span>
               </div>
             <div className="mt-2 text-sm font-semibold text-zinc-100">
               {buildResolvedSceneHeading(sceneSummary)}
@@ -4854,29 +4841,6 @@ export default function CampaignPage() {
             <div className="mt-2 text-sm text-emerald-100">
               <span className="font-medium text-emerald-300/80">Goal:</span>{" "}
               {sceneSummary.goal}
-            </div>
-            <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
-              <span
-                className={`rounded-full px-2 py-0.5 font-medium ${getMoodBadgeClass(
-                  sceneSummary.mood,
-                )}`}
-              >
-                Mood: {sceneSummary.mood}
-              </span>
-              <span
-                className={`rounded-full px-2 py-0.5 font-medium ${getThreatBadgeClass(
-                  sceneSummary.threat,
-                )}`}
-              >
-                Threat: {sceneSummary.threat}
-              </span>
-              <span
-                className={`rounded-full px-2 py-0.5 font-medium ${getClockBadgeClass(
-                  sceneSummary.clock,
-                )}`}
-              >
-                Clock: {sceneSummary.clock}
-              </span>
             </div>
           </section>
 
@@ -4891,14 +4855,13 @@ export default function CampaignPage() {
                   node.scrollHeight - node.scrollTop - node.clientHeight;
                 setChatAutoScrollPaused(distanceFromBottom > 72);
               }}
-              className="h-[46vh] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-3"
+              className={`overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-3 ${
+                engineCombatUiLocked ? "h-[60vh]" : "h-[50vh]"
+              }`}
             >
             {messages.map((msg, index) => (
               (() => {
                 const bubbleStyles = getMessageBubbleStyles(msg, companionColorMap);
-                const isEditableScenarioBubble =
-                  !isScenarioActive && index === 0 && msg.role === "gm";
-
                 return (
               <div
                 key={msg.id ?? `${msg.role}-${index}`}
@@ -4909,36 +4872,18 @@ export default function CampaignPage() {
                 >
                   {msg.speakerName}
                 </div>
-                {isEditableScenarioBubble ? (
-                  <div className="space-y-2">
-                    <textarea
-                      value={scenarioDraft}
-                      onChange={(event) => {
-                        setScenarioDraft(event.target.value);
-                        if (error === "The starting scenario cannot be blank.") {
-                          setError("");
-                        }
-                      }}
-                      placeholder="Enter the opening scenario..."
-                      className="min-h-[96px] w-full rounded-xl border border-zinc-700 bg-zinc-950/80 px-3 py-2.5 text-sm text-zinc-100 outline-none focus:border-zinc-500"
-                    />
-                    <div className="flex items-center justify-between gap-3">
-                      <p className="text-xs text-zinc-400">
-                        This opening scenario can be edited until you press Start.
-                      </p>
-                      <button
-                        type="button"
-                        onClick={saveScenarioDraft}
-                        disabled={isSavingScenario || !scenarioDraft.trim()}
-                        className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-1.5 text-xs font-medium text-zinc-200 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-                      >
-                        {isSavingScenario ? "Saving..." : "Update scenario"}
-                      </button>
-                    </div>
-                  </div>
-                ) : (
-                  <MessageBody role={msg.role} content={msg.content} />
-                )}
+                <MessageBody
+                  role={msg.role}
+                  content={msg.content}
+                  suppressChoiceList={
+                    msg.role === "gm" &&
+                    (engineCombatUiLocked ||
+                      (engineCombatModeEnabled &&
+                        /\b(?:combat\s+begins?|combat\s+is\s+now\s+active|combat\s+active|initiative)\b/i.test(
+                          msg.content,
+                        )))
+                  }
+                />
               </div>
                 );
               })()
@@ -4950,8 +4895,8 @@ export default function CampaignPage() {
               </div>
             )}
           </div>
-          <div className="mt-2 flex items-center justify-between gap-2 text-[11px] text-zinc-400">
-            <label className="inline-flex items-center gap-2">
+          <div className="mt-2 flex h-5 items-center justify-between gap-2 text-[11px] text-zinc-400">
+            <label className="inline-flex items-center gap-2 whitespace-nowrap">
               <input
                 type="checkbox"
                 checked={followChatLive}
@@ -4978,20 +4923,35 @@ export default function CampaignPage() {
                     node.scrollTop = node.scrollHeight;
                   }
                 }}
-                className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-200 transition hover:border-zinc-500"
+                className="h-5 shrink-0 whitespace-nowrap rounded-md border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-200 transition hover:border-zinc-500"
               >
                 Jump to latest
               </button>
             ) : null}
           </div>
 
-          <form onSubmit={handleSubmit} onKeyDown={handleCombatControlsKeyDown} className="mt-3 space-y-2">
-            {engineCombatUiLocked ? (
+          <form onSubmit={handleSubmit} onKeyDown={handleCombatControlsKeyDown} className="mt-2 space-y-2">
+            {false && engineCombatUiLocked ? (
               <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-2.5">
                 <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5">
-                  <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan-100">
-                    Engine Combat Controls
-                  </p>
+                  <div className="flex items-center gap-2">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan-100">
+                      Engine Combat Controls
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleCombatEngineSubmit({
+                          kind: combatActionKind,
+                          targetRef: combatActionTargetRef,
+                        })
+                      }
+                      disabled={Boolean(combatSubmitDisabledReason)}
+                      className="rounded-xl border border-emerald-300/60 bg-emerald-300/25 px-2.5 py-1 text-[11px] font-semibold text-emerald-50 transition hover:border-emerald-200 hover:bg-emerald-300/35 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {isSubmittingCombatAction ? "Resolving..." : "Confirm"}
+                    </button>
+                  </div>
                   <div className="flex flex-wrap items-center gap-1 text-[10px] text-cyan-100/90">
                     <span className="rounded-md border border-cyan-400/30 bg-cyan-400/10 px-1.5 py-0.5">
                       Round {combatState.round}
@@ -5173,36 +5133,11 @@ export default function CampaignPage() {
                 </div>
 
                 <div className="mt-1.5 flex flex-wrap gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() =>
-                      handleCombatEngineSubmit({
-                        kind: combatActionKind,
-                        targetRef: combatActionTargetRef,
-                      })
-                    }
-                    disabled={Boolean(combatSubmitDisabledReason)}
-                    className="rounded-xl border border-cyan-300/40 bg-cyan-300/10 px-2.5 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:border-cyan-300/70 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isSubmittingCombatAction ? "Resolving..." : "Confirm (Enter)"}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleEndEngineCombatAndHandoff}
-                    disabled={isEndingEngineCombat || isAutoResolvingCombat || loading}
-                    className="rounded-xl border border-amber-300/40 bg-amber-300/10 px-2.5 py-1.5 text-[11px] font-medium text-amber-100 transition hover:border-amber-300/70 disabled:cursor-not-allowed disabled:opacity-60"
-                  >
-                    {isEndingEngineCombat ? "Ending..." : "End Combat"}
-                  </button>
                   {combatSubmitDisabledReason ? (
                     <span className="self-center text-[11px] text-amber-100/85">
                       {combatSubmitDisabledReason}
                     </span>
                   ) : null}
-                </div>
-
-                <div className="mt-1.5 text-[10px] text-cyan-100/80">
-                  Shortcuts: number keys switch action, Enter confirms, R/Esc resolve reactions.
                 </div>
 
                 {isAutoResolvingCombat ? (
@@ -5246,49 +5181,6 @@ export default function CampaignPage() {
                   </div>
                 ) : null}
 
-                <div className="mt-2 rounded-lg border border-zinc-700 bg-zinc-950/70 p-2">
-                  <div className="mb-1 flex items-center justify-between gap-2">
-                    <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-400">
-                      Combat Log
-                    </div>
-                    <div className="flex items-center gap-1">
-                      {(["all", "player", "enemy", "rules"] as const).map((filterKey) => (
-                        <button
-                          key={filterKey}
-                          type="button"
-                          onClick={() => setCombatLogFilter(filterKey)}
-                          className={`rounded px-1.5 py-0.5 text-[10px] ${
-                            combatLogFilter === filterKey
-                              ? "bg-zinc-700 text-zinc-100"
-                              : "bg-zinc-900 text-zinc-400"
-                          }`}
-                        >
-                          {filterKey}
-                        </button>
-                      ))}
-                      <button
-                        type="button"
-                        onClick={() => setShowCombatLogInline((current) => !current)}
-                        className="rounded border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[10px] text-zinc-200"
-                      >
-                        {showCombatLogInline ? "Hide" : "Show"}
-                      </button>
-                    </div>
-                  </div>
-                  {showCombatLogInline ? (
-                    filteredCombatLogEntries.length > 0 ? (
-                      <div className="max-h-28 space-y-1 overflow-y-auto pr-1 text-[11px] text-zinc-300">
-                        {filteredCombatLogEntries.slice(-8).map((entry) => (
-                          <div key={entry.id} className="rounded-md border border-zinc-800 bg-zinc-950 px-2 py-1">
-                            {entry.text}
-                          </div>
-                        ))}
-                      </div>
-                    ) : (
-                      <p className="text-[11px] text-zinc-500">No matching log entries.</p>
-                    )
-                  ) : null}
-                </div>
               </div>
             ) : null}
             {!engineCombatUiLocked &&
@@ -5326,9 +5218,7 @@ export default function CampaignPage() {
                 placeholder={
                   needsCharacterGeneration
                     ? "Generate your main character to begin."
-                    : !isScenarioActive
-                      ? "Press Start to begin the scenario."
-                      : "Type your action..."
+                    : "Type your action..."
                 }
                 className="min-h-[84px] w-full rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2.5 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-60"
               />
@@ -5337,26 +5227,13 @@ export default function CampaignPage() {
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
                 <button
-                  type={!isScenarioActive && !needsCharacterGeneration ? "button" : "submit"}
-                  onClick={
-                    !isScenarioActive && !needsCharacterGeneration
-                      ? handleScenarioAction
-                      : undefined
-                  }
+                  type="submit"
                   disabled={
-                    !isScenarioActive && !needsCharacterGeneration
-                      ? isTogglingScenario || isSavingScenario
-                      : loading || !input.trim() || isChatLocked || engineCombatUiLocked
+                    loading || !input.trim() || isChatLocked || engineCombatUiLocked
                   }
                   className="rounded-xl bg-zinc-100 px-4 py-2 font-medium text-zinc-900 disabled:opacity-50"
                 >
-                  {!isScenarioActive && !needsCharacterGeneration
-                    ? isTogglingScenario
-                      ? "Starting..."
-                      : "Start"
-                    : engineCombatUiLocked
-                      ? "Combat Mode"
-                      : "Send"}
+                  {engineCombatUiLocked ? "Combat Mode" : "Send"}
                 </button>
                 <button
                   type="button"
@@ -5391,10 +5268,9 @@ export default function CampaignPage() {
                             type="button"
                             onClick={handleScenarioAction}
                             disabled={
-                              !isScenarioActive ||
                               needsCharacterGeneration ||
                               isTogglingScenario ||
-                              isSavingScenario
+                              loading
                             }
                             className="block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-200 transition hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
                           >
@@ -5591,7 +5467,158 @@ export default function CampaignPage() {
               ) : null}
             </div>
           {activeSidebarView === "characters" ? (
-            <div className="max-h-[calc(100vh-6rem)] overflow-y-auto pr-1">
+            <div className="flex min-h-0 flex-col gap-2">
+              {engineCombatUiLocked && !detailCardId ? (
+                <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-2.5">
+                  <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5">
+                    <div className="flex items-center gap-2">
+                      <p className="text-[11px] font-semibold uppercase tracking-[0.12em] text-cyan-100">
+                        Engine Combat Controls
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleCombatEngineSubmit({
+                            kind: combatActionKind,
+                            targetRef: combatActionTargetRef,
+                          })
+                        }
+                        disabled={Boolean(combatSubmitDisabledReason)}
+                        className="rounded-xl border border-emerald-300/60 bg-emerald-300/25 px-2.5 py-1 text-[11px] font-semibold text-emerald-50 transition hover:border-emerald-200 hover:bg-emerald-300/35 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        {isSubmittingCombatAction ? "Resolving..." : "Confirm"}
+                      </button>
+                    </div>
+                    <div className="rounded-md border border-cyan-400/30 bg-cyan-400/10 px-1.5 py-0.5 text-[10px] text-cyan-100/90">
+                      Round {combatState.round}
+                    </div>
+                  </div>
+                  {pendingReaction ? (
+                    <div className="mb-1.5 rounded-lg border border-amber-400/30 bg-amber-400/10 p-1.5">
+                      <p className="text-[11px] font-medium text-amber-100">
+                        Reaction Pending ({reactionElapsedSeconds}s): {pendingReaction.targetName} can use Shield.
+                      </p>
+                      <div className="mt-1.5 flex flex-wrap gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => void handleResolvePendingReaction("use-shield")}
+                          disabled={isSubmittingCombatAction || isAutoResolvingCombat || loading}
+                          className="rounded-lg border border-cyan-300/40 bg-cyan-300/10 px-2.5 py-1.5 text-[11px] font-medium text-cyan-100 transition hover:border-cyan-300/70 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Use Shield (R)
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => void handleResolvePendingReaction("decline")}
+                          disabled={isSubmittingCombatAction || isAutoResolvingCombat || loading}
+                          className="rounded-lg border border-zinc-500/40 bg-zinc-500/10 px-2.5 py-1.5 text-[11px] font-medium text-zinc-100 transition hover:border-zinc-300/70 disabled:cursor-not-allowed disabled:opacity-60"
+                        >
+                          Decline (Esc)
+                        </button>
+                      </div>
+                    </div>
+                  ) : null}
+                  <div className="grid gap-1.5">
+                    <select
+                      value={combatActionKind}
+                      onChange={(event) => setCombatActionKind(event.target.value as CombatActionKind)}
+                      disabled={isSubmittingCombatAction || isAutoResolvingCombat || loading}
+                      className="w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      {combatActionOptions.map((option, index) => (
+                        <option key={option.kind} value={option.kind}>
+                          {index + 1}. {option.label}
+                        </option>
+                      ))}
+                    </select>
+                    <select
+                      value={combatActionTargetRef}
+                      onChange={(event) => setCombatActionTargetRef(event.target.value)}
+                      disabled={
+                        (combatActionKind !== "attack" && combatActionKind !== "cast-spell") ||
+                        isSubmittingCombatAction ||
+                        combatLegalTargets.length === 0
+                      }
+                      className="w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      {combatActionKind !== "attack" && combatActionKind !== "cast-spell" ? (
+                        <option value="">No target required</option>
+                      ) : combatLegalTargets.length === 0 ? (
+                        <option value="">No valid targets</option>
+                      ) : (
+                        combatLegalTargets.map((entry) => (
+                          <option key={entry.id ?? entry.name} value={entry.id ?? entry.name}>
+                            {entry.name} {entry.hp ? `(${entry.hp})` : ""}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                    <select
+                      value={combatAttackPresetId}
+                      onChange={(event) => setCombatAttackPresetId(event.target.value)}
+                      disabled={
+                        (combatActionKind !== "attack" && combatActionKind !== "cast-spell") ||
+                        isSubmittingCombatAction ||
+                        isAutoResolvingCombat ||
+                        loading
+                      }
+                      className="w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      {combatActionPresets
+                        .filter((preset) =>
+                          combatActionKind === "cast-spell"
+                            ? preset.category === "spell"
+                            : combatActionKind === "attack"
+                              ? preset.category === "weapon"
+                              : false,
+                        )
+                        .map((preset) => (
+                          <option key={preset.id} value={preset.id}>
+                            {preset.label}
+                          </option>
+                        ))}
+                    </select>
+                    <select
+                      value={combatSpellSlotLevel}
+                      onChange={(event) => setCombatSpellSlotLevel(event.target.value)}
+                      disabled={
+                        combatActionKind !== "cast-spell" ||
+                        !selectedCombatSpellConsumesSlot ||
+                        isSubmittingCombatAction ||
+                        isAutoResolvingCombat ||
+                        loading
+                      }
+                      className="w-full min-w-0 rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-1.5 text-[11px] text-zinc-200 outline-none focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-70"
+                    >
+                      {combatActionKind !== "cast-spell" ? (
+                        <option value="">No slot needed</option>
+                      ) : !selectedCombatSpellConsumesSlot ? (
+                        <option value="">Cantrip (no slot)</option>
+                      ) : availableSpellSlotLevels.length === 0 ? (
+                        <option value="">No spell slots</option>
+                      ) : (
+                        availableSpellSlotLevels.map((slotLevel) => (
+                          <option key={slotLevel} value={slotLevel}>
+                            {slotLevel}
+                          </option>
+                        ))
+                      )}
+                    </select>
+                  </div>
+                  <p className="mt-1 text-[11px] text-zinc-300">
+                    {selectedActionRulePreview ?? "No preview available."}
+                  </p>
+                </div>
+              ) : null}
+              <div
+                className={`min-h-0 flex-1 overflow-y-auto pr-1 ${
+                  detailCardId
+                    ? "max-h-[calc(100vh-10.5rem)]"
+                    : engineCombatUiLocked
+                    ? "max-h-[calc(100vh-16rem-8vh)]"
+                    : "max-h-[calc(100vh-10.5rem)]"
+                }`}
+              >
               {combatActive && !detailCardId ? (
                 <div className="space-y-2 text-xs text-zinc-300">
                   <div className="rounded-xl border border-red-400/20 bg-red-400/5 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-red-200/90">
@@ -5615,6 +5642,7 @@ export default function CampaignPage() {
                           isGeneratingPortrait={generatingPortraitId === linkedCharacter.id}
                           collapsed={Boolean(collapsedCards[linkedCharacter.id])}
                           fullDetail={false}
+                          preferCollapsedDetailOpen={combatActive}
                           initiativeOrder={index + 1}
                           isActiveTurn={entry.active}
                           reactionStatus={getCombatReactionStatus(combatState, linkedCharacter)}
@@ -5665,7 +5693,7 @@ export default function CampaignPage() {
                 </div>
               ) : (
                 <div
-                  className={`grid gap-3 text-xs text-zinc-300 ${
+                  className={`grid gap-2 text-xs text-zinc-300 ${
                     "grid-cols-1"
                     }`}
                 >
@@ -5679,6 +5707,7 @@ export default function CampaignPage() {
                       isGeneratingPortrait={generatingPortraitId === mainCharacter.id}
                       collapsed={Boolean(collapsedCards[mainCharacter.id])}
                       fullDetail={detailCardId === mainCharacter.id}
+                      preferCollapsedDetailOpen={combatActive}
                       initiativeOrder={getCharacterInitiativeOrder(combatState, mainCharacter)}
                       isActiveTurn={isCombatantActive(combatState, mainCharacter)}
                       reactionStatus={getCombatReactionStatus(combatState, mainCharacter)}
@@ -5710,9 +5739,10 @@ export default function CampaignPage() {
                         );
                       }}
                       onToggleDetail={() => {
+                        const isClosingDetail = detailCardId === mainCharacter.id;
                         setCollapsedCards((current) => ({
                           ...current,
-                          [mainCharacter.id]: false,
+                          [mainCharacter.id]: isClosingDetail ? combatActive : false,
                         }));
                         setDetailCardId((currentDetailCardId) =>
                           currentDetailCardId === mainCharacter.id ? "" : mainCharacter.id,
@@ -5742,6 +5772,7 @@ export default function CampaignPage() {
                         isGeneratingPortrait={generatingPortraitId === character.id}
                         collapsed={Boolean(collapsedCards[character.id])}
                         fullDetail={detailCardId === character.id}
+                        preferCollapsedDetailOpen={combatActive}
                         initiativeOrder={getCharacterInitiativeOrder(combatState, character)}
                         isActiveTurn={isCombatantActive(combatState, character)}
                         reactionStatus={getCombatReactionStatus(combatState, character)}
@@ -5773,9 +5804,10 @@ export default function CampaignPage() {
                           );
                         }}
                         onToggleDetail={() => {
+                          const isClosingDetail = detailCardId === character.id;
                           setCollapsedCards((current) => ({
                             ...current,
-                            [character.id]: false,
+                            [character.id]: isClosingDetail ? combatActive : false,
                           }));
                           setDetailCardId((currentDetailCardId) =>
                             currentDetailCardId === character.id ? "" : character.id,
@@ -5791,6 +5823,7 @@ export default function CampaignPage() {
                   ) : null}
                   </div>
               )}
+              </div>
               </div>
           ) : activeSidebarView === "party" ? (
             <div className="max-h-[calc(100vh-6rem)] overflow-y-auto pr-1">
@@ -6353,6 +6386,106 @@ export default function CampaignPage() {
 
                     {activePartyTab === "quests" ? (
                       <>
+                        <div className="rounded-lg border border-zinc-800 bg-zinc-900/60 p-3">
+                          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                            Campaign
+                          </div>
+                          <div className="mt-2 space-y-2 text-xs text-zinc-300">
+                            <div>
+                              <span className="text-zinc-400">Objective:</span>{" "}
+                              {bootstrapObjective || "No objective set."}
+                            </div>
+                            <div>
+                              <div className="text-zinc-400">Known Quests:</div>
+                              {bootstrapKnownQuests.length > 0 ? (
+                                <ul className="mt-1 space-y-1 text-zinc-300">
+                                  {bootstrapKnownQuests.map((quest) => (
+                                    <li key={quest.id} className="rounded border border-zinc-800 px-2 py-1">
+                                      <div className="font-medium">
+                                        {quest.title}
+                                        {quest.status ? ` (${quest.status})` : ""}
+                                      </div>
+                                      {quest.objective ? (
+                                        <div className="text-[11px] text-zinc-400">
+                                          {quest.objective}
+                                        </div>
+                                      ) : null}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="mt-1 text-zinc-500">No known quests yet.</div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-zinc-400">Rumors (Teased Hooks):</div>
+                              {bootstrapRumorQuests.length > 0 ? (
+                                <ul className="mt-1 list-disc pl-4 text-zinc-300">
+                                  {bootstrapRumorQuests.map((quest) => (
+                                    <li key={quest.id}>{quest.title}</li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="mt-1 text-zinc-500">No teased hooks right now.</div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-zinc-400">Visible Clocks:</div>
+                              {bootstrapVisibleClocks.length > 0 ? (
+                                <ul className="mt-1 list-disc pl-4 text-zinc-300">
+                                  {bootstrapVisibleClocks.map((clock) => (
+                                    <li key={clock.id}>
+                                      {clock.name}: {clock.current}/{clock.max}
+                                    </li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="mt-1 text-zinc-500">No visible clocks yet.</div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-zinc-400">Revealed Clues:</div>
+                              {bootstrapRevealedClues.length > 0 ? (
+                                <ul className="mt-1 list-disc pl-4 text-zinc-300">
+                                  {bootstrapRevealedClues.map((clue) => (
+                                    <li key={clue.id}>{clue.text}</li>
+                                  ))}
+                                </ul>
+                              ) : (
+                                <div className="mt-1 text-zinc-500">No revealed clues yet.</div>
+                              )}
+                            </div>
+                            <div>
+                              <div className="text-zinc-400">Expansion Events:</div>
+                              {bootstrapExpansionEvents.length > 0 ? (
+                                <>
+                                <div className="mt-1 text-[11px] text-zinc-500">
+                                  Showing latest 8 events.
+                                </div>
+                                <ul className="mt-1 space-y-1 text-zinc-300">
+                                  {bootstrapExpansionEvents
+                                    .slice()
+                                    .reverse()
+                                    .slice(0, 8)
+                                    .map((event) => (
+                                      <li key={event.id} className="rounded border border-zinc-800 px-2 py-1">
+                                        <div className="flex items-center justify-between gap-2 text-[11px] uppercase tracking-wide text-zinc-500">
+                                          <span>{event.kind.replace(/_/g, " ")}</span>
+                                          <span className="normal-case tracking-normal text-zinc-400">
+                                            {new Date(event.createdAt).toLocaleString()}
+                                          </span>
+                                        </div>
+                                        <div>{event.text}</div>
+                                      </li>
+                                    ))}
+                                </ul>
+                                </>
+                              ) : (
+                                <div className="mt-1 text-zinc-500">No expansion events yet.</div>
+                              )}
+                            </div>
+                          </div>
+                        </div>
                         <PartyStateDisplay
                           label="Active Quests"
                           value={campaign?.partyStateJson.activeQuests}
@@ -6715,6 +6848,7 @@ export default function CampaignPage() {
                         <option value="portrait">Portrait</option>
                         <option value="character">Character</option>
                         <option value="action">Action</option>
+                        <option value="character-token">Character Token</option>
                       </select>
                     </div>
                     {selectedSceneImage ? (
@@ -6904,24 +7038,53 @@ export default function CampaignPage() {
                     <div className="rounded-lg border border-zinc-800 bg-zinc-900/70 px-3 py-2 text-[11px] text-zinc-400">
                       Generate an image by combining Instructions + Custom Description + Style Description.
                     </div>
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-                        TYPE
-                      </label>
-                      <select
-                        value={sceneImagePromptType}
-                        onChange={(event) =>
-                          setSceneImagePromptType(event.target.value as SceneImagePromptType)
-                        }
-                        className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
-                      >
-                        <option value="scene">Scene</option>
-                        <option value="portrait">Portrait</option>
-                        <option value="character">Character</option>
-                        <option value="action">Action</option>
-                      </select>
+                    <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                          TYPE
+                        </label>
+                        <select
+                          value={sceneImagePromptType}
+                          onChange={(event) =>
+                            setSceneImagePromptType(event.target.value as SceneImagePromptType)
+                          }
+                          className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 outline-none focus:border-zinc-600"
+                        >
+                          <option value="scene">Scene</option>
+                          <option value="portrait">Portrait</option>
+                          <option value="character">Character</option>
+                          <option value="action">Action</option>
+                          <option value="character-token">Character Token</option>
+                        </select>
+                      </div>
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                          STYLE
+                        </label>
+                        <select
+                          value={sceneImageStylePreset}
+                          onChange={(event) =>
+                            setSceneImageStylePreset(event.target.value as SceneImageStylePreset)
+                          }
+                          disabled={sceneImagePromptType === "character-token"}
+                          className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-2.5 py-1.5 text-xs text-zinc-100 outline-none focus:border-zinc-600"
+                        >
+                          <option value="cinematic-realism">Cinematic Realism</option>
+                          <option value="fantasy-illustration">Fantasy Illustration</option>
+                          <option value="stone-base">Stone Base</option>
+                          <option value="comic-book">Comic Book</option>
+                          <option value="manga">Manga</option>
+                          <option value="stylized-3d">Stylized 3D</option>
+                          <option value="noir">Noir</option>
+                          <option value="pulp-poster">Pulp Poster</option>
+                          <option value="parchment-map">Parchment Map</option>
+                          <option value="tactical-map">Tactical Map</option>
+                        </select>
+                      </div>
                     </div>
-                    {sceneImagePromptType === "portrait" || sceneImagePromptType === "character" ? (
+                    {sceneImagePromptType === "portrait" ||
+                    sceneImagePromptType === "character" ||
+                    sceneImagePromptType === "character-token" ? (
                       <div className="space-y-1">
                         <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
                           CHARACTER
@@ -6958,30 +7121,8 @@ export default function CampaignPage() {
                         value={sceneImageCustomDescription}
                         onChange={(event) => setSceneImageCustomDescription(event.target.value)}
                         placeholder="Scene- or subject-specific details."
-                        className="min-h-[110px] w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
+                        className="min-h-[88px] w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
                       />
-                    </div>
-                    <div className="space-y-1">
-                      <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-                        STYLE
-                      </label>
-                      <select
-                        value={sceneImageStylePreset}
-                        onChange={(event) =>
-                          setSceneImageStylePreset(event.target.value as SceneImageStylePreset)
-                        }
-                        className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
-                      >
-                        <option value="cinematic-realism">Cinematic Realism</option>
-                        <option value="fantasy-illustration">Fantasy Illustration</option>
-                        <option value="comic-book">Comic Book</option>
-                        <option value="manga">Manga</option>
-                        <option value="stylized-3d">Stylized 3D</option>
-                        <option value="noir">Noir</option>
-                        <option value="pulp-poster">Pulp Poster</option>
-                        <option value="parchment-map">Parchment Map</option>
-                        <option value="tactical-map">Tactical Map</option>
-                      </select>
                     </div>
                     <div className="space-y-1">
                       <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
@@ -7004,6 +7145,7 @@ export default function CampaignPage() {
                           onChange={(event) =>
                             setSceneImageAspectRatio(event.target.value as SceneImageAspectRatio)
                           }
+                          disabled={sceneImagePromptType === "character-token"}
                           className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
                         >
                           <option value="landscape">Landscape (3:2)</option>
@@ -7024,6 +7166,31 @@ export default function CampaignPage() {
                           className="w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
                         />
                       </div>
+                    </div>
+                    <div className="space-y-1">
+                      <div className="flex items-center justify-between">
+                        <label className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                          COMBINED PROMPT
+                        </label>
+                        <button
+                          type="button"
+                          onClick={() => setIsCombinedPromptHidden((current) => !current)}
+                          className="rounded border border-zinc-700 px-2 py-0.5 text-[11px] font-medium text-zinc-300 transition hover:border-zinc-500 hover:text-zinc-100"
+                        >
+                          {isCombinedPromptHidden ? "Show" : "Hide"}
+                        </button>
+                      </div>
+                      {!isCombinedPromptHidden ? (
+                        <textarea
+                          value={buildSceneImagePromptFromSections({
+                            instructions: sceneImageInstructions,
+                            customDescription: sceneImageCustomDescription,
+                            styleDescription: sceneImageStyleDescription,
+                          })}
+                          readOnly
+                          className="min-h-[110px] w-full rounded-lg border border-zinc-800 bg-zinc-950 px-3 py-2 font-mono text-xs text-zinc-300 outline-none"
+                        />
+                      ) : null}
                     </div>
                     <button
                       type="button"
@@ -7061,6 +7228,7 @@ function CharacterCard({
   isGeneratingPortrait,
   collapsed,
   fullDetail,
+  preferCollapsedDetailOpen = false,
   initiativeOrder,
   isActiveTurn,
   reactionStatus,
@@ -7080,6 +7248,7 @@ function CharacterCard({
   isGeneratingPortrait: boolean;
   collapsed: boolean;
   fullDetail: boolean;
+  preferCollapsedDetailOpen?: boolean;
   initiativeOrder?: number;
   isActiveTurn?: boolean;
   reactionStatus?: "ready" | "used";
@@ -7097,6 +7266,10 @@ function CharacterCard({
   const [isDetailMenuOpen, setIsDetailMenuOpen] = useState(false);
   const [isEditingSheet, setIsEditingSheet] = useState(false);
   const [isSavingSheet, setIsSavingSheet] = useState(false);
+  const [expandedCharacterImage, setExpandedCharacterImage] = useState<{
+    src: string;
+    alt: string;
+  } | null>(null);
   const [editError, setEditError] = useState("");
   const [editName, setEditName] = useState(character.name);
   const [editSheetJson, setEditSheetJson] = useState<EditableSheetObject>(
@@ -7109,7 +7282,11 @@ function CharacterCard({
     "behaviorSummary",
   ]);
   const allStatEntries = Object.entries(character.sheetJson ?? {}).filter(
-    ([key]) => key !== "source" && key !== "concept" && key !== "portraitDataUrl",
+    ([key]) =>
+      key !== "source" &&
+      key !== "concept" &&
+      key !== "portraitDataUrl" &&
+      key !== "tokenDataUrl",
   );
   const detailEntries = allStatEntries.filter(([key]) => longTextKeys.has(key));
   const orderedDetailEntries = [...detailEntries].sort(([leftKey], [rightKey]) => {
@@ -7337,6 +7514,10 @@ function CharacterCard({
   const portraitDataUrl =
     typeof character.sheetJson?.portraitDataUrl === "string"
       ? character.sheetJson.portraitDataUrl
+      : "";
+  const tokenDataUrl =
+    typeof character.sheetJson?.tokenDataUrl === "string"
+      ? character.sheetJson.tokenDataUrl
       : "";
   const portraitSizeClass = collapsed
     ? "h-14 w-14"
@@ -8162,6 +8343,30 @@ function CharacterCard({
           isActiveTurn ? "ring-2 ring-amber-300/60" : ""
         }`}
       >
+        {expandedCharacterImage ? (
+          <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/80 p-2 md:p-3">
+            <div className="relative h-full max-h-[96vh] w-full max-w-[96vw] rounded-lg border border-zinc-700 bg-zinc-950 p-2 md:p-3">
+              <div className="mb-2 flex items-center justify-between gap-2 text-xs text-zinc-300">
+                <div className="truncate">{expandedCharacterImage.alt}</div>
+                <button
+                  type="button"
+                  onClick={() => setExpandedCharacterImage(null)}
+                  className="rounded-md border border-zinc-600 px-2 py-1 text-[11px] text-zinc-200 transition hover:border-zinc-400 hover:text-white"
+                >
+                  Close
+                </button>
+              </div>
+              <div className="flex h-[calc(100%-2rem)] items-center justify-center overflow-auto rounded-md border border-zinc-800 bg-black/40">
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src={expandedCharacterImage.src}
+                  alt={expandedCharacterImage.alt}
+                  className="max-h-full max-w-full object-contain"
+                />
+              </div>
+            </div>
+          </div>
+        ) : null}
         <div className="flex items-start justify-between gap-2">
             <div className="min-w-0">
               <div className={`flex min-w-0 items-center gap-1.5 text-base font-medium ${cardStyles.nameClass}`}>
@@ -8232,19 +8437,101 @@ function CharacterCard({
           </div>
         </div>
 
-        <div className="mt-3 overflow-hidden rounded-lg border border-zinc-800/70 bg-zinc-950/60">
-          <Image
-            src={portraitDataUrl || DEFAULT_PORTRAIT_DATA_URL}
-            alt={
-              portraitDataUrl
-                ? `${character.name} portrait`
-                : `${character.name} placeholder portrait`
-            }
-            width={768}
-            height={768}
-            unoptimized
-            className="h-56 w-full object-contain"
-          />
+        <div className="mt-3 grid grid-cols-2 gap-2">
+          <div className="relative overflow-hidden rounded-lg border border-zinc-800/70 bg-zinc-950/60">
+            <Image
+              src={portraitDataUrl || DEFAULT_PORTRAIT_DATA_URL}
+              alt={
+                portraitDataUrl
+                  ? `${character.name} portrait`
+                  : `${character.name} placeholder portrait`
+              }
+              width={768}
+              height={768}
+              unoptimized
+              className="h-56 w-full object-contain"
+            />
+            <button
+              type="button"
+              onClick={() =>
+                setExpandedCharacterImage({
+                  src: portraitDataUrl || DEFAULT_PORTRAIT_DATA_URL,
+                  alt: portraitDataUrl
+                    ? `${character.name} portrait`
+                    : `${character.name} placeholder portrait`,
+                })
+              }
+              className="absolute bottom-1.5 right-1.5 rounded-md border border-zinc-600 bg-zinc-900/90 p-1.5 text-zinc-100 transition hover:border-zinc-400 hover:text-white"
+              aria-label="Expand portrait image"
+              title="Expand"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                className="h-3.5 w-3.5"
+                aria-hidden="true"
+              >
+                <path d="M9 3H3v6" />
+                <path d="M15 3h6v6" />
+                <path d="M9 21H3v-6" />
+                <path d="M15 21h6v-6" />
+                <path d="M3 3l7 7" />
+                <path d="M21 3l-7 7" />
+                <path d="M3 21l7-7" />
+                <path d="M21 21l-7-7" />
+              </svg>
+            </button>
+          </div>
+          <div className="relative overflow-hidden rounded-lg border border-zinc-800/70 bg-zinc-950/60">
+            <Image
+              src={tokenDataUrl || DEFAULT_PORTRAIT_DATA_URL}
+              alt={
+                tokenDataUrl
+                  ? `${character.name} token`
+                  : `${character.name} placeholder token`
+              }
+              width={768}
+              height={768}
+              unoptimized
+              className="h-56 w-full object-contain"
+            />
+            <button
+              type="button"
+              onClick={() =>
+                setExpandedCharacterImage({
+                  src: tokenDataUrl || DEFAULT_PORTRAIT_DATA_URL,
+                  alt: tokenDataUrl
+                    ? `${character.name} token`
+                    : `${character.name} placeholder token`,
+                })
+              }
+              className="absolute bottom-1.5 right-1.5 rounded-md border border-zinc-600 bg-zinc-900/90 p-1.5 text-zinc-100 transition hover:border-zinc-400 hover:text-white"
+              aria-label="Expand token image"
+              title="Expand"
+            >
+              <svg
+                xmlns="http://www.w3.org/2000/svg"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+                className="h-3.5 w-3.5"
+                aria-hidden="true"
+              >
+                <path d="M9 3H3v6" />
+                <path d="M15 3h6v6" />
+                <path d="M9 21H3v-6" />
+                <path d="M15 21h6v-6" />
+                <path d="M3 3l7 7" />
+                <path d="M21 3l-7 7" />
+                <path d="M3 21l7-7" />
+                <path d="M21 21l-7-7" />
+              </svg>
+            </button>
+          </div>
         </div>
 
         <div className="mt-3 flex items-center justify-between gap-3">
@@ -8536,7 +8823,8 @@ function CharacterCard({
                       !equipmentKeys.has(key) &&
                       !spellKeys.has(key) &&
                       key !== "source" &&
-                      key !== "portraitDataUrl",
+                      key !== "portraitDataUrl" &&
+                      key !== "tokenDataUrl",
                   ),
                   "No saved stats yet.",
                 )}
@@ -8750,7 +9038,8 @@ function CharacterCard({
                         (isDeadlandsCharacter && deadlandsSkillKeys.has(key))) &&
                       !(isDeadlandsCharacter && (key === "edges" || key === "skills")) &&
                       key !== "source" &&
-                      key !== "portraitDataUrl",
+                      key !== "portraitDataUrl" &&
+                      key !== "tokenDataUrl",
                   ),
                   "No saved skills yet.",
                 )
@@ -8762,7 +9051,8 @@ function CharacterCard({
                     ([key]) =>
                       equipmentKeys.has(key) &&
                       key !== "source" &&
-                      key !== "portraitDataUrl",
+                      key !== "portraitDataUrl" &&
+                      key !== "tokenDataUrl",
                   ),
                   "No saved equipment yet.",
                 )
@@ -8775,7 +9065,8 @@ function CharacterCard({
                       spellKeys.has(key) &&
                       isVisibleDeadlandsHexField(key) &&
                       key !== "source" &&
-                      key !== "portraitDataUrl",
+                      key !== "portraitDataUrl" &&
+                      key !== "tokenDataUrl",
                   ),
                   isDeadlandsCharacter ? "No saved hexes yet." : "No saved spells yet.",
                 )
@@ -8855,7 +9146,7 @@ function CharacterCard({
       className={`relative rounded-xl border transition-colors ${cardStyles.hoverContainerClass} ${cardStyles.containerClass} ${
         isActiveTurn ? "ring-2 ring-amber-300/60" : ""
       } ${
-        collapsed ? "p-2" : "p-3"
+        collapsed ? "p-2" : fullDetail ? "p-3" : "p-2"
       }`}
     >
       <div className="flex items-start gap-3">
@@ -8895,12 +9186,41 @@ function CharacterCard({
               {collapsed ? (
                 <button
                   type="button"
-                  onClick={onToggle}
+                  onClick={preferCollapsedDetailOpen ? onToggleDetail : onToggle}
                   className={`rounded-md border px-1.5 py-1 text-[10px] transition ${cardStyles.toggleClass}`}
-                  aria-label="Expand character card"
-                  title="Expand character card"
+                  aria-label={
+                    preferCollapsedDetailOpen
+                      ? "Show full detail view"
+                      : "Expand character card"
+                  }
+                  title={
+                    preferCollapsedDetailOpen
+                      ? "Show full detail view"
+                      : "Expand character card"
+                  }
                 >
-                  +
+                  {preferCollapsedDetailOpen ? (
+                    <svg
+                      xmlns="http://www.w3.org/2000/svg"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="1.8"
+                      className="h-3.5 w-3.5"
+                      aria-hidden="true"
+                    >
+                      <path d="M9 3H3v6" />
+                      <path d="M15 3h6v6" />
+                      <path d="M9 21H3v-6" />
+                      <path d="M15 21h6v-6" />
+                      <path d="M3 3l7 7" />
+                      <path d="M21 3l-7 7" />
+                      <path d="M3 21l7-7" />
+                      <path d="M21 21l-7-7" />
+                    </svg>
+                  ) : (
+                    "+"
+                  )}
                 </button>
               ) : (
                 <>
@@ -8980,7 +9300,7 @@ function CharacterCard({
               ) : null}
             </div>
           ) : (
-              <div className="mt-2 space-y-2 text-[11px]">
+              <div className={`${fullDetail ? "mt-2 space-y-2" : "mt-1 space-y-1"} text-[11px]`}>
                 <div className={`rounded-md bg-zinc-950/20 px-2 py-1 ${cardStyles.summaryClass}`}>
                   {isDeadlandsCharacter ? (
                     <span className={`block truncate ${cardStyles.valueClass}`}>
@@ -9122,25 +9442,6 @@ function PartyStateTextarea({
         placeholder={placeholder}
         className="min-h-[84px] w-full rounded-lg border border-zinc-800 bg-zinc-900 px-3 py-2 text-sm text-zinc-100 outline-none focus:border-zinc-600"
       />
-    </div>
-  );
-}
-
-function DebugPanel({
-  title,
-  content,
-}: {
-  title: string;
-  content: string;
-}) {
-  return (
-    <div className="rounded-xl border border-zinc-800 bg-zinc-950 p-3">
-      <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
-        {title}
-      </div>
-      <pre className="mt-2 max-h-64 overflow-auto whitespace-pre-wrap break-words text-xs leading-5 text-zinc-200">
-        {content}
-      </pre>
     </div>
   );
 }
@@ -9507,6 +9808,9 @@ function getCharacterPhysicalDescription(character: CampaignCharacter | null) {
 }
 
 function formatSceneImageStylePresetLabel(stylePreset: SceneImageStylePreset) {
+  if (stylePreset === "stone-base") {
+    return "Stone Base";
+  }
   if (stylePreset === "cinematic-realism") {
     return "Cinematic Realism";
   }
@@ -9545,6 +9849,9 @@ function formatSceneImagePromptTypeLabel(promptType: string) {
   if (normalized === "action") {
     return "Action";
   }
+  if (normalized === "character-token") {
+    return "Character Token";
+  }
   return "Scene";
 }
 
@@ -9574,6 +9881,13 @@ function buildSceneImageGenerationMeta(params: {
     return {
       title: "Action Sequence",
       subtitle: params.sceneSummary.location.trim() || params.campaignTitle.trim() || ruleset,
+    };
+  }
+  if (params.promptType === "character-token") {
+    const characterName = params.selectedCharacter?.name?.trim() || "Character";
+    return {
+      title: `${characterName} Token`,
+      subtitle: ruleset,
     };
   }
   return {
@@ -9997,37 +10311,111 @@ function getComparableSheetValue(value: unknown): number | null {
 function MessageBody({
   role,
   content,
+  suppressChoiceList = false,
 }: {
   role: string;
   content: string;
+  suppressChoiceList?: boolean;
 }) {
-  const displayContent = role === "gm" ? stripVisibleSceneMetadata(content) : content;
+  const baseContent = role === "gm" ? stripVisibleSceneMetadata(content) : content;
+  const normalizedContent =
+    role === "gm"
+      ? normalizeChoiceTextForDisplay(formatInitiativeTextForDisplay(baseContent))
+      : baseContent;
+  const effectiveContent =
+    role === "gm" && suppressChoiceList
+      ? stripChoiceTextForDisplay(normalizedContent)
+      : normalizedContent;
   const typographyClass =
     role === "gm"
       ? "text-[15px] leading-7 text-zinc-100"
       : role === "companion"
         ? "text-[14px] leading-6 text-emerald-100"
         : "text-[14px] leading-6 text-blue-50";
-  const contentLines = displayContent
+  const contentLines = effectiveContent
     .split("\n")
     .map((line) => line.trimEnd());
 
   return (
     <div className={typographyClass}>
       {contentLines.length > 0 ? (
-        renderMessageLines(contentLines, role)
+        renderMessageLines(contentLines, role, suppressChoiceList)
       ) : (
-        <p>{renderStyledText(displayContent)}</p>
+        <p>{renderStyledText(effectiveContent)}</p>
       )}
     </div>
   );
 }
 
-function renderMessageLines(lines: string[], role: string) {
+function formatInitiativeTextForDisplay(text: string) {
+  const initiativeMatch = text.match(/\bINITIATIVE\b/i);
+  if (!initiativeMatch || initiativeMatch.index === undefined) {
+    return text;
+  }
+  const blockStart = initiativeMatch.index;
+  const prefix = text.slice(0, blockStart).trimEnd();
+  const initiativeBlock = text.slice(blockStart);
+  const body = initiativeBlock.replace(/^\s*INITIATIVE\s*/i, "").trim();
+  if (!body) {
+    return prefix ? `${prefix}\n\nINITIATIVE` : "INITIATIVE";
+  }
+
+  const entries: string[] = [];
+  const rollPatterns = [
+    /([^:\n]+?):\s*(?:🎲\s*)?Roll:?\s*d\d+\([^)]*\)(?:\s*\+\s*[-+]?\d+)?\s*=\s*[-+]?\d+/gi,
+    /([^:\n]+?):\s*d\d+\([^)]*\)(?:\s*\+\s*[-+]?\d+)?\s*=\s*[-+]?\d+/gi,
+  ];
+
+  for (const pattern of rollPatterns) {
+    let match: RegExpExecArray | null = pattern.exec(body);
+    while (match) {
+      entries.push(match[0].trim());
+      match = pattern.exec(body);
+    }
+    if (entries.length >= 2) {
+      break;
+    }
+  }
+
+  if (entries.length < 2) {
+    return text;
+  }
+
+  const formatted = `INITIATIVE\n${entries.map((entry) => `- ${entry}`).join("\n")}`;
+  return prefix ? `${prefix}\n\n${formatted}` : formatted;
+}
+
+function stripChoiceTextForDisplay(text: string) {
+  return text
+    .split("\n")
+    .map((line) => {
+      const withoutHeader = line.replace(/^\s*numbered options\s*:?\s*/i, "").trimEnd();
+      if (!withoutHeader.trim()) {
+        return "";
+      }
+
+      if (/^\s*[1-9]\.\s+/.test(withoutHeader)) {
+        return "";
+      }
+
+      const inlineChoiceStart = withoutHeader.search(/\b1\.\s+\S/);
+      const hasSecondInlineChoice = /\b2\.\s+\S/.test(withoutHeader);
+      if (inlineChoiceStart >= 0 && hasSecondInlineChoice) {
+        return withoutHeader.slice(0, inlineChoiceStart).trimEnd();
+      }
+
+      return withoutHeader;
+    })
+    .filter((line) => line.trim().length > 0)
+    .join("\n");
+}
+
+function renderMessageLines(lines: string[], role: string, suppressChoiceList = false) {
   const elements: React.ReactNode[] = [];
   let bufferedParagraph: string[] = [];
   let bufferedChoices: Array<{ id: string; text: string }> = [];
-  const allowChoiceList = role === "gm";
+  let bufferedBullets: string[] = [];
+  const allowChoiceList = role === "gm" && !suppressChoiceList;
 
   function flushParagraph() {
     if (bufferedParagraph.length === 0) {
@@ -10059,18 +10447,78 @@ function renderMessageLines(lines: string[], role: string) {
     bufferedChoices = [];
   }
 
+  function flushBullets() {
+    if (bufferedBullets.length === 0) {
+      return;
+    }
+
+    elements.push(
+      <ul key={`bullets-${elements.length}`} className="mt-3 list-disc space-y-1 pl-6">
+        {bufferedBullets.map((bullet, index) => (
+          <li key={`bullet-${index}`} className="pl-1 marker:text-cyan-200">
+            {renderStyledText(bullet)}
+          </li>
+        ))}
+      </ul>,
+    );
+    bufferedBullets = [];
+  }
+
   lines.forEach((line) => {
     const trimmedLine = line.trim();
-    const choiceMatch = trimmedLine.match(/^(\d+\.)\s+(.+)$/);
+    const normalizedLine = trimmedLine.replace(/^\*+|\*+$/g, "").trim();
+    const choiceMatch = normalizedLine.match(/^([1-9]\.)\s+(.+)$/);
+    const inlineChoices = allowChoiceList
+      ? Array.from(
+          normalizedLine.matchAll(/([1-9]\.)\s+([\s\S]*?)(?=\s+[1-9]\.\s+|$)/g),
+        ).map((match) => ({
+          id: match[1],
+          text: match[2].replace(/^\*+|\*+$/g, "").trim(),
+        }))
+      : [];
+    const bulletMatch = normalizedLine.match(/^[-*]\s+(.+)$/);
 
     if (!trimmedLine) {
       flushParagraph();
+      flushBullets();
       flushChoices();
+      return;
+    }
+
+    if (allowChoiceList && inlineChoices.length >= 2) {
+      flushParagraph();
+      flushBullets();
+      const firstNumber = Number.parseInt(inlineChoices[0].id.replace(".", ""), 10);
+      const firstMarkerIndex = normalizedLine.search(/\d+\.\s+/);
+      const leadingCandidate =
+        firstMarkerIndex > 0
+          ? normalizedLine
+              .slice(0, firstMarkerIndex)
+              .replace(/^\*+|\*+$/g, "")
+              .trim()
+          : "";
+      if (
+        leadingCandidate &&
+        Number.isFinite(firstNumber) &&
+        firstNumber > 1
+      ) {
+        bufferedChoices.push({
+          id: `${firstNumber - 1}.`,
+          text: leadingCandidate,
+        });
+      }
+      inlineChoices.forEach((choice) => {
+        if (!choice.text) {
+          return;
+        }
+        bufferedChoices.push(choice);
+      });
       return;
     }
 
     if (choiceMatch && allowChoiceList) {
       flushParagraph();
+      flushBullets();
       bufferedChoices.push({
         id: choiceMatch[1],
         text: choiceMatch[2],
@@ -10078,8 +10526,16 @@ function renderMessageLines(lines: string[], role: string) {
       return;
     }
 
+    if (bulletMatch) {
+      flushParagraph();
+      flushChoices();
+      bufferedBullets.push(bulletMatch[1]);
+      return;
+    }
+
     if (/^roll:/i.test(trimmedLine)) {
       flushParagraph();
+      flushBullets();
       flushChoices();
       elements.push(
         <div
@@ -10095,11 +10551,13 @@ function renderMessageLines(lines: string[], role: string) {
       return;
     }
 
+    flushBullets();
     flushChoices();
     bufferedParagraph.push(trimmedLine);
   });
 
   flushParagraph();
+  flushBullets();
   flushChoices();
 
   return elements;
@@ -10874,17 +11332,6 @@ function isCombatantDefeated(entry: CombatRosterEntry) {
   );
 }
 
-function getCombatLogCategory(text: string): "player" | "enemy" | "rules" {
-  const normalized = text.toLowerCase();
-  if (normalized.includes("reaction") || normalized.startsWith("[adapter]")) {
-    return "rules";
-  }
-  if (normalized.startsWith("[auto]")) {
-    return "enemy";
-  }
-  return "player";
-}
-
 function buildCombatResolutionNarration(resolution: {
   profile?: "dnd" | "deadlands" | "generic";
   delivery?: "attack" | "save";
@@ -11289,18 +11736,35 @@ function getLatestChoiceMap(messages: ChatMessage[]) {
     .filter((message) => message.role === "gm");
 
   for (const gmMessage of reversedGmMessages) {
-    const visibleContent = stripVisibleSceneMetadata(gmMessage.content);
+    const visibleContent = normalizeChoiceTextForDisplay(
+      stripVisibleSceneMetadata(gmMessage.content),
+    );
     const choiceMap = new Map<number, string>();
 
-    visibleContent.split("\n").forEach((line) => {
-      const match = line.trim().match(/^(\d+)\.\s+(.+)$/);
-
-      if (!match) {
+    const inlineMatches = Array.from(
+      visibleContent.matchAll(/([1-9])\.\s+([\s\S]*?)(?=\s+[1-9]\.\s+|\n|$)/g),
+    );
+    inlineMatches.forEach((match) => {
+      const numericId = Number(match[1]);
+      const text = match[2].trim();
+      if (!Number.isFinite(numericId) || !text) {
         return;
       }
-
-      choiceMap.set(Number(match[1]), match[2].trim());
+      choiceMap.set(numericId, text);
     });
+
+    if (choiceMap.size === 0) {
+      visibleContent.split("\n").forEach((line) => {
+        const normalizedLine = line.trim().replace(/^\*+|\*+$/g, "").trim();
+        const match = normalizedLine.match(/^([1-9])\.\s+(.+)$/);
+
+        if (!match) {
+          return;
+        }
+
+        choiceMap.set(Number(match[1]), match[2].trim());
+      });
+    }
 
     if (choiceMap.size > 0) {
       return choiceMap;
@@ -11327,6 +11791,13 @@ function getMessageBubbleStyles(
     return {
       containerClass: palette.bubbleContainerClass,
       labelClass: palette.bubbleLabelClass,
+    };
+  }
+
+  if (message.isEnemyNarration) {
+    return {
+      containerClass: "border-rose-800/70 bg-rose-950/30",
+      labelClass: "text-rose-200",
     };
   }
 
@@ -12363,10 +12834,12 @@ export function buildSceneHeading(sceneSummary: SceneSummary) {
 }
 
 function stripVisibleSceneMetadata(text: string) {
-  const withoutSceneBlock = stripSceneBlock(text);
+  const decodedText = decodeEscapedNewlines(text);
+  const withoutSceneBlock = stripSceneBlock(decodedText);
   const withoutPartyBlock = extractPartyBlock(withoutSceneBlock).content;
   const withoutCombatBlock = extractCombatBlock(withoutPartyBlock).content;
-  const withoutLooseSceneHeader = withoutCombatBlock.replace(
+  const withoutBootstrapBlock = extractCampaignBootstrapBlock(withoutCombatBlock).content;
+  const withoutLooseSceneHeader = withoutBootstrapBlock.replace(
     /^\s*(?:Title|Place|Mood|Threat|Goal|Clock|Context):[\s\S]*?(?=\n\s*\n|(?:\n\s*(?:\d+\.\s|[-*]\s))|$)/i,
     "",
   );
@@ -12377,6 +12850,7 @@ function stripVisibleSceneMetadata(text: string) {
       /^\s*SCENE:\s*\n(?:\s*(?:Title|Place|Mood|Threat|Goal|Clock|Context):[^\n]*\n?)+(?:\s*ENDS?CEN?E?\s*\n?)?/i,
       "",
     )
+    .replace(/(?:^|\n)\s*END[ A-Z]*SCEN[ A-Z]*\s*(?=\n|$)/gi, "\n")
     .replace(/(?:^|\n)\s*ENDS?CEN?E?\s*(?=\n|$)/gi, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
@@ -12418,16 +12892,4 @@ function getThreatBadgeClass(threat: string) {
   return "bg-lime-500/15 text-lime-200 ring-1 ring-lime-400/20";
 }
 
-function getClockBadgeClass(clock: string) {
-  const normalized = clock.toLowerCase();
 
-  if (/(10 min|minute|minutes|urgent|rising|countdown|soon|before|within)/.test(normalized)) {
-    return "bg-orange-500/15 text-orange-200 ring-1 ring-orange-400/20";
-  }
-
-  if (/(hour|hours)/.test(normalized)) {
-    return "bg-rose-500/15 text-rose-200 ring-1 ring-rose-400/20";
-  }
-
-  return "bg-zinc-800 text-zinc-200 ring-1 ring-zinc-700";
-}

@@ -19,6 +19,7 @@ import {
 } from "@/lib/party";
 import { DEFAULT_COMBAT_STATE } from "@/lib/combat";
 import { generateCampaignRecap } from "@/lib/recap";
+import { buildDefaultStartSceneImagePrompt } from "@/lib/map-prompt";
 
 const PROMPT_HIDDEN_SHEET_KEYS = new Set([
   "source",
@@ -170,7 +171,7 @@ export async function POST(req: NextRequest, context: RouteContext) {
     const resetPartyState = clearResettablePartyState(
       (campaign as { partyStateJson?: unknown }).partyStateJson,
     );
-    const resetCharacters = await prisma.$transaction([
+    await prisma.$transaction([
       prisma.campaign.update({
         where: { id },
         data: {
@@ -188,7 +189,9 @@ export async function POST(req: NextRequest, context: RouteContext) {
           },
         },
       }),
-      ...campaign.characters.map((character) =>
+    ]);
+    const updatedCharacters = await Promise.all(
+      campaign.characters.map((character) =>
         prisma.character.update({
           where: { id: character.id },
           data: {
@@ -196,8 +199,7 @@ export async function POST(req: NextRequest, context: RouteContext) {
           },
         }),
       ),
-    ]);
-    const updatedCharacters = resetCharacters.slice(2);
+    );
 
     return NextResponse.json({
       messages: [scenarioMessage],
@@ -343,6 +345,11 @@ export async function POST(req: NextRequest, context: RouteContext) {
     ruleset: campaign.ruleset,
     campaignTitle: campaign.title,
     latestGmContent: gmMessage.content,
+    scenePrompt: buildDefaultStartSceneImagePrompt({
+      ruleset: campaign.ruleset,
+      latestGmContent: gmMessage.content,
+    }),
+    aspectRatio: "landscape",
   });
   const sceneImageHistory = appendSceneImageHistory(
     (campaign as { sceneImageHistoryJson?: unknown }).sceneImageHistoryJson,

@@ -7,12 +7,6 @@ const RULESET_OPTIONS = [
   "D&D 5e",
   "Deadlands Classic",
   "Savage Rifts",
-  "Mutants in the Now",
-  "Astonishing Super Heroes",
-  "Star Wars RPG",
-  "Legend of 5 Rings 4e",
-  "Vampire: The Masqureade V5",
-  "Call of Cthulhu",
 ] as const;
 
 export default function NewCharacterPage() {
@@ -37,8 +31,10 @@ export default function NewCharacterPage() {
       backHref={`/characters?ruleset=${encodeURIComponent(requestedRuleset)}&returnTo=${encodeURIComponent(returnTo)}`}
       backLabel={isCompanionFlow ? "Open Library" : "Open Library"}
       headingKicker="Character Creation"
-      headingTitle="Create a Reusable Character"
-      headingDescription="Build a reusable library character once, then import them into any new campaign that uses the same ruleset."
+      headingTitle=""
+      headingDescription=""
+      showHeading={false}
+      showInlineHeaderWhenNoHero
     />
   );
 }

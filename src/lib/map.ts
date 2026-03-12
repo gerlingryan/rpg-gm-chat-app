@@ -11,6 +11,8 @@ export type SceneMapState = {
   sceneTitle: string;
   place: string;
   summary: string;
+  imageType: "scene" | "portrait" | "character" | "action" | "character-token";
+  imageStyle: string;
   imageDataUrl: string | null;
   generatedAt: string;
 };
@@ -64,6 +66,19 @@ export function normalizeSceneMapState(value: unknown): SceneMapState | null {
     typeof typedValue.summary === "string" && typedValue.summary.trim()
       ? typedValue.summary.trim()
       : "A visual impression of the current scene.";
+  const rawImageType =
+    typeof typedValue.imageType === "string" ? typedValue.imageType.trim().toLowerCase() : "";
+  const imageType: SceneMapState["imageType"] =
+    rawImageType === "portrait" ||
+    rawImageType === "character" ||
+    rawImageType === "action" ||
+    rawImageType === "character-token"
+      ? rawImageType
+      : "scene";
+  const imageStyle =
+    typeof typedValue.imageStyle === "string" && typedValue.imageStyle.trim()
+      ? typedValue.imageStyle.trim()
+      : "Fantasy Illustration";
   const imageDataUrl =
     typeof typedValue.imageDataUrl === "string" &&
     typedValue.imageDataUrl.startsWith("data:image/")
@@ -79,6 +94,8 @@ export function normalizeSceneMapState(value: unknown): SceneMapState | null {
     sceneTitle,
     place,
     summary,
+    imageType,
+    imageStyle,
     imageDataUrl,
     generatedAt,
   };
@@ -250,6 +267,8 @@ export function buildFallbackSceneMap(
     sceneTitle: mergedScene.sceneTitle,
     place,
     summary,
+    imageType: "scene",
+    imageStyle: "Fantasy Illustration",
     imageDataUrl: null,
     generatedAt: new Date().toISOString(),
   };
@@ -260,6 +279,9 @@ export async function generateSceneMap(params: {
   campaignTitle: string;
   latestGmContent: string;
   scenePrompt?: string;
+  imageType?: SceneMapState["imageType"];
+  aspectRatio?: string;
+  seed?: number;
 }) {
   const latestGmContent = params.latestGmContent.trim();
   const extractedScene = extractSceneBlock(latestGmContent);
@@ -268,6 +290,13 @@ export async function generateSceneMap(params: {
   const fallbackMap = buildFallbackSceneMap(extractedScene.scene, narrative);
 
   try {
+    const normalizedAspectRatio = (params.aspectRatio ?? "").trim().toLowerCase();
+    const imageSize =
+      normalizedAspectRatio === "portrait"
+        ? "1024x1536"
+        : normalizedAspectRatio === "square"
+          ? "1024x1024"
+          : "1536x1024";
     const scenePrompt =
       overridePrompt ||
       buildSceneMapImagePrompt({
@@ -275,17 +304,37 @@ export async function generateSceneMap(params: {
         campaignTitle: params.campaignTitle,
         latestGmContent,
       });
-    const imageResponse = (await openai.images.generate({
-      model: "gpt-image-1-mini",
-      size: "1536x1024",
-      prompt: scenePrompt,
-    })) as unknown as {
-      data?: Array<{
-        b64_json?: string | null;
-      }>;
+    const generateImage = async (withTransparentBackground: boolean) => {
+      const imageRequest = {
+        model: "gpt-image-1-mini",
+        size: imageSize,
+        prompt: scenePrompt,
+        ...(withTransparentBackground ? { transparent_background: true } : {}),
+        ...(typeof params.seed === "number" && Number.isFinite(params.seed)
+          ? { seed: Math.trunc(params.seed) }
+          : {}),
+      };
+      const imageResponse = (await openai.images.generate(imageRequest as never)) as unknown as {
+        data?: Array<{
+          b64_json?: string | null;
+        }>;
+      };
+      return imageResponse.data?.[0]?.b64_json ?? null;
     };
 
-    const b64Json = imageResponse.data?.[0]?.b64_json;
+    let b64Json: string | null = null;
+    if (params.imageType === "character-token") {
+      try {
+        b64Json = await generateImage(true);
+      } catch {
+        b64Json = await generateImage(false);
+      }
+      if (!b64Json) {
+        b64Json = await generateImage(false);
+      }
+    } else {
+      b64Json = await generateImage(false);
+    }
 
     if (!b64Json) {
       return fallbackMap;

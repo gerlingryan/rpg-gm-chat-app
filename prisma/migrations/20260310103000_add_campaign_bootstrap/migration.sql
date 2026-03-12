@@ -1,0 +1,3 @@
+ALTER TABLE "Campaign"
+ADD COLUMN "bootstrapVersion" INTEGER NOT NULL DEFAULT 1,
+ADD COLUMN "bootstrapJson" JSONB;

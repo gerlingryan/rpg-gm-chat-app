@@ -7,6 +7,15 @@ export type CombatRosterEntry = {
   summary?: string;
   hp?: string;
   statusEffects?: string[];
+  statusDurations?: CombatStatusDuration[];
+};
+
+export type CombatStatusDuration = {
+  effect: string;
+  remainingRounds: number;
+  source?: string;
+  kind?: "concentration" | "timed";
+  breakOnDamage?: boolean;
 };
 
 export type CombatState = {
@@ -65,6 +74,14 @@ function normalizeCombatRosterEntry(value: unknown): CombatRosterEntry | null {
         )
         .map((entry) => entry.trim())
     : [];
+  const explicitDurations = Array.isArray(typedValue.statusDurations)
+    ? typedValue.statusDurations
+        .map((entry) => normalizeCombatStatusDuration(entry))
+        .filter((entry): entry is CombatStatusDuration => Boolean(entry))
+    : [];
+  const inferredDurations = inferStatusDurationsFromStatusEffects(statusEffects);
+  const statusDurations = mergeStatusDurations(explicitDurations, inferredDurations);
+  const normalizedStatusEffects = normalizeStatusEffectsWithDurations(statusEffects, statusDurations);
 
   return {
     id,
@@ -74,8 +91,125 @@ function normalizeCombatRosterEntry(value: unknown): CombatRosterEntry | null {
     active,
     summary,
     hp,
-    statusEffects,
+    statusEffects: normalizedStatusEffects,
+    statusDurations,
   };
+}
+
+function normalizeCombatStatusDuration(value: unknown): CombatStatusDuration | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const typedValue = value as Record<string, unknown>;
+  const effect = typeof typedValue.effect === "string" ? typedValue.effect.trim() : "";
+  if (!effect) {
+    return null;
+  }
+  const remainingRoundsRaw =
+    typeof typedValue.remainingRounds === "number" && Number.isFinite(typedValue.remainingRounds)
+      ? typedValue.remainingRounds
+      : Number.NaN;
+  const remainingRounds = Number.isFinite(remainingRoundsRaw)
+    ? Math.max(0, Math.trunc(remainingRoundsRaw))
+    : 0;
+  const source =
+    typeof typedValue.source === "string" && typedValue.source.trim()
+      ? typedValue.source.trim()
+      : undefined;
+  const kindRaw =
+    typeof typedValue.kind === "string" ? typedValue.kind.trim().toLowerCase() : "";
+  const kind: CombatStatusDuration["kind"] =
+    kindRaw === "concentration" || kindRaw === "timed" ? kindRaw : undefined;
+  const breakOnDamage = typedValue.breakOnDamage === true;
+
+  return {
+    effect,
+    remainingRounds,
+    source,
+    kind,
+    breakOnDamage,
+  };
+}
+
+function normalizeDurationKey(effect: string, source?: string) {
+  return `${effect.trim().toLowerCase()}::${(source ?? "").trim().toLowerCase()}`;
+}
+
+function mergeStatusDurations(
+  primary: CombatStatusDuration[],
+  secondary: CombatStatusDuration[],
+) {
+  const merged: CombatStatusDuration[] = [];
+  const seen = new Set<string>();
+  for (const duration of [...primary, ...secondary]) {
+    const key = normalizeDurationKey(duration.effect, duration.source);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    merged.push(duration);
+  }
+  return merged.filter((duration) => duration.remainingRounds > 0);
+}
+
+function inferStatusDurationsFromStatusEffects(statusEffects: string[]) {
+  const durations: CombatStatusDuration[] = [];
+  for (const effect of statusEffects) {
+    const concentrationMatch = effect.match(/^Concentrating:\s*(.+?)\s*\((\d+)r\)$/i);
+    if (concentrationMatch) {
+      durations.push({
+        effect: "Concentrating",
+        source: concentrationMatch[1].trim(),
+        remainingRounds: Math.max(0, Number(concentrationMatch[2])),
+        kind: "concentration",
+        breakOnDamage: true,
+      });
+      continue;
+    }
+
+    const genericDurationMatch = effect.match(/^(.+?)\s*\((\d+)r\)$/i);
+    if (genericDurationMatch) {
+      durations.push({
+        effect: genericDurationMatch[1].trim(),
+        remainingRounds: Math.max(0, Number(genericDurationMatch[2])),
+        kind: "timed",
+      });
+    }
+  }
+  return durations.filter((entry) => entry.remainingRounds > 0);
+}
+
+function normalizeStatusEffectsWithDurations(
+  statusEffects: string[],
+  statusDurations: CombatStatusDuration[],
+) {
+  const normalized = statusEffects
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0)
+    .map((entry) => {
+      const concentrationMatch = entry.match(/^Concentrating:\s*(.+?)\s*\((\d+)r\)$/i);
+      if (concentrationMatch) {
+        return "Concentrating";
+      }
+      const genericDurationMatch = entry.match(/^(.+?)\s*\((\d+)r\)$/i);
+      if (genericDurationMatch) {
+        return genericDurationMatch[1].trim();
+      }
+      return entry;
+    });
+
+  const normalizedLower = new Set(normalized.map((entry) => entry.toLowerCase()));
+  for (const duration of statusDurations) {
+    const base = duration.effect.trim();
+    if (!base) {
+      continue;
+    }
+    if (!normalizedLower.has(base.toLowerCase())) {
+      normalized.push(base);
+      normalizedLower.add(base.toLowerCase());
+    }
+  }
+  return normalized;
 }
 
 export function normalizeCombatState(value: unknown): CombatState {
@@ -139,7 +273,16 @@ export function formatCombatStateForPrompt(value: unknown) {
     "Roster:",
     ...combatState.roster.map(
       (entry, index) =>
-        `${index + 1}. ${entry.name} [${entry.type}] init ${entry.initiative}${entry.active ? " (active)" : ""}${entry.hp ? ` hp ${entry.hp}` : ""}${entry.summary ? ` - ${entry.summary}` : ""}`,
+        `${index + 1}. ${entry.name} [${entry.type}] init ${entry.initiative}${entry.active ? " (active)" : ""}${entry.hp ? ` hp ${entry.hp}` : ""}${entry.summary ? ` - ${entry.summary}` : ""}${
+          Array.isArray(entry.statusDurations) && entry.statusDurations.length > 0
+            ? ` | durations: ${entry.statusDurations
+                .map((duration) => {
+                  const sourcePart = duration.source ? `:${duration.source}` : "";
+                  return `${duration.effect}${sourcePart}(${duration.remainingRounds}r)`;
+                })
+                .join(", ")}`
+            : ""
+        }`,
     ),
   ].join("\n");
 }

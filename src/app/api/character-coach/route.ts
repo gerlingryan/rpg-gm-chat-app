@@ -6,6 +6,7 @@ import {
   extractRequestedOptionCount,
   formatCoachReplyWithSections,
   parseJsonObject,
+  shouldGenerateFieldSuggestions,
 } from "@/lib/character-coach";
 
 type CoachMessage = {
@@ -45,6 +46,7 @@ export async function POST(req: NextRequest) {
       ? (body.snapshot as Record<string, unknown>)
       : {};
   const explicitTargetField =
+    body.targetField === "name" ||
     body.targetField === "personality" ||
     body.targetField === "background" ||
     body.targetField === "physicalDescription"
@@ -62,8 +64,20 @@ export async function POST(req: NextRequest) {
     requestedFields.add(explicitTargetField);
   }
   const requestedFieldsList = [...requestedFields];
+  const allowFieldSuggestions = shouldGenerateFieldSuggestions({
+    message: userMessage,
+    explicitTargetField,
+    requestedFields,
+    requestedOptionCount,
+  });
   const targetedFieldGuardrail =
-    requestedFieldsList.length > 0
+    !allowFieldSuggestions
+      ? [
+          "This request is advisory-only.",
+          "Return empty strings for all suggestion fields.",
+          "Return empty arrays for all options fields.",
+        ].join(" ")
+      : requestedFieldsList.length > 0
       ? [
           `The user requested only these fields: ${requestedFieldsList.join(", ")}.`,
           "Populate only those fields and matching option arrays.",
@@ -89,7 +103,37 @@ export async function POST(req: NextRequest) {
 
   try {
     let retryUsed = false;
-    const runCoachRequest = async (strictMode: boolean) => {
+    const optionTargetCount = Math.max(1, Math.min(10, requestedOptionCount ?? 3));
+    const readOptions = (value: unknown, maxLength: number) =>
+      Array.isArray(value)
+        ? value
+            .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
+            .map((entry) => clampText(entry, maxLength))
+            .filter((entry) => entry.length > 0)
+            .slice(0, optionTargetCount)
+        : [];
+    const countOptionsForRequestedFields = (
+      optionsSource: Record<string, unknown>,
+      fields: Set<"name" | "personality" | "background" | "physicalDescription">,
+    ) => {
+      const nameCount = readOptions(optionsSource.nameOptions, 120).length;
+      const personalityCount = readOptions(optionsSource.personalityOptions, 1000).length;
+      const backgroundCount = readOptions(optionsSource.backgroundOptions, 1800).length;
+      const physicalCount = readOptions(optionsSource.physicalDescriptionOptions, 700).length;
+
+      if (fields.size === 0) {
+        return nameCount + personalityCount + backgroundCount + physicalCount;
+      }
+
+      let total = 0;
+      if (fields.has("name")) total += nameCount;
+      if (fields.has("personality")) total += personalityCount;
+      if (fields.has("background")) total += backgroundCount;
+      if (fields.has("physicalDescription")) total += physicalCount;
+      return total;
+    };
+
+    const runCoachRequest = async (strictMode: boolean, exactCountMode: boolean) => {
       const response = await openai.responses.create({
         model: "gpt-5.1",
         input: [
@@ -100,10 +144,13 @@ export async function POST(req: NextRequest) {
               "You provide advice only. You do not claim to save or change character data.",
               `Ruleset context: ${ruleset}.`,
               "Respond with valid JSON only in this exact shape:",
-              '{"reply":"<short coaching response>","suggestions":{"personality":"<optional text>","background":"<optional text>","physicalDescription":"<optional text>"},"options":{"personalityOptions":["<option 1>"],"backgroundOptions":["<option 1>"],"physicalDescriptionOptions":["<option 1>"]}}',
+              '{"reply":"<short coaching response>","suggestions":{"name":"<optional text>","personality":"<optional text>","background":"<optional text>","physicalDescription":"<optional text>"},"options":{"nameOptions":["<option 1>"],"personalityOptions":["<option 1>"],"backgroundOptions":["<option 1>"],"physicalDescriptionOptions":["<option 1>"]}}',
               "Keep reply under 140 words.",
               "Suggestion fields are optional, but include them when user asks for writing help.",
               "If user asks for multiple options, provide them in the matching options array with complete text (no placeholders).",
+              exactCountMode
+                ? `Requested option count hint must be satisfied exactly: return ${optionTargetCount} options in each requested option array.`
+                : "",
               targetedFieldGuardrail,
               strictMode
                 ? "Be concrete and complete. Do not return generic intros without the requested options/content."
@@ -133,13 +180,13 @@ export async function POST(req: NextRequest) {
         parseJsonObject(response.output_text ?? "") ??
         ({
           reply:
-            "I can help shape personality, background, or physical description. Tell me the tone you want.",
+            "I can help shape name, personality, background, or physical description. Tell me the tone you want.",
           suggestions: {},
         } as Record<string, unknown>)
       );
     };
 
-    let parsed = await runCoachRequest(false);
+    let parsed = await runCoachRequest(false, false);
 
     const suggestionsSource =
       parsed.suggestions && typeof parsed.suggestions === "object" && !Array.isArray(parsed.suggestions)
@@ -149,21 +196,11 @@ export async function POST(req: NextRequest) {
       parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
         ? (parsed.options as Record<string, unknown>)
         : {};
-    const readOptions = (value: unknown, maxLength: number) =>
-      Array.isArray(value)
-        ? value
-            .filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-            .map((entry) => clampText(entry, maxLength))
-            .filter((entry) => entry.length > 0)
-            .slice(0, Math.max(1, requestedOptionCount ?? 3))
-        : [];
 
     const firstPassReply = clampText(parsed.reply, 1200);
-    const firstPassOptionsCount =
-      readOptions(optionsSource.personalityOptions, 1000).length +
-      readOptions(optionsSource.backgroundOptions, 1800).length +
-      readOptions(optionsSource.physicalDescriptionOptions, 700).length;
+    const firstPassOptionsCount = countOptionsForRequestedFields(optionsSource, requestedFields);
     const firstPassSuggestionsCount = [
+      clampText(suggestionsSource.name, 120),
       clampText(suggestionsSource.personality, 1000),
       clampText(suggestionsSource.background, 1800),
       clampText(suggestionsSource.physicalDescription, 700),
@@ -178,8 +215,23 @@ export async function POST(req: NextRequest) {
         (!expectedOptions && firstPassSuggestionsCount === 0));
 
     if (shouldRetryForQuality) {
-      parsed = await runCoachRequest(true);
+      parsed = await runCoachRequest(true, false);
       retryUsed = true;
+    }
+
+    if (allowFieldSuggestions && requestedOptionCount !== null && requestedOptionCount > 0) {
+      const postRetryOptionsSource =
+        parsed.options && typeof parsed.options === "object" && !Array.isArray(parsed.options)
+          ? (parsed.options as Record<string, unknown>)
+          : {};
+      const postRetryOptionCount = countOptionsForRequestedFields(
+        postRetryOptionsSource,
+        requestedFields,
+      );
+      if (postRetryOptionCount < requestedOptionCount) {
+        parsed = await runCoachRequest(true, true);
+        retryUsed = true;
+      }
     }
 
     const finalSuggestionsSource =
@@ -191,25 +243,31 @@ export async function POST(req: NextRequest) {
         ? (parsed.options as Record<string, unknown>)
         : {};
 
+    const nameOptions =
+      allowFieldSuggestions && (requestedFields.size === 0 || requestedFields.has("name"))
+        ? readOptions(finalOptionsSource.nameOptions, 120)
+        : [];
     const personalityOptions =
-      requestedFields.size === 0 || requestedFields.has("personality")
+      allowFieldSuggestions && (requestedFields.size === 0 || requestedFields.has("personality"))
         ? readOptions(finalOptionsSource.personalityOptions, 1000)
         : [];
     const backgroundOptions =
-      requestedFields.size === 0 || requestedFields.has("background")
+      allowFieldSuggestions && (requestedFields.size === 0 || requestedFields.has("background"))
         ? readOptions(finalOptionsSource.backgroundOptions, 1800)
         : [];
     const physicalDescriptionOptions =
-      requestedFields.size === 0 || requestedFields.has("physicalDescription")
+      allowFieldSuggestions &&
+      (requestedFields.size === 0 || requestedFields.has("physicalDescription"))
         ? readOptions(finalOptionsSource.physicalDescriptionOptions, 700)
         : [];
     const baseReply =
       clampText(parsed.reply, 1200) ||
-      "I can help shape personality, background, or physical description. Tell me the tone you want.";
+      "I can help shape name, personality, background, or physical description. Tell me the tone you want.";
     const coachMessage: CoachMessage = {
       role: "assistant",
       content: formatCoachReplyWithSections({
         reply: baseReply,
+        nameCount: nameOptions.length,
         personalityCount: personalityOptions.length,
         backgroundCount: backgroundOptions.length,
         physicalCount: physicalDescriptionOptions.length,
@@ -219,8 +277,10 @@ export async function POST(req: NextRequest) {
       targetField: explicitTargetField,
       requestedFields: requestedFieldsList,
       requestedOptionCount: requestedOptionCount ?? null,
+      allowFieldSuggestions,
       retryUsed,
       optionCounts: {
+        name: nameOptions.length,
         personality: personalityOptions.length,
         background: backgroundOptions.length,
         physical: physicalDescriptionOptions.length,
@@ -230,20 +290,27 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       message: coachMessage,
       suggestions: {
+        name:
+          allowFieldSuggestions && (requestedFields.size === 0 || requestedFields.has("name"))
+            ? clampText(finalSuggestionsSource.name, 120)
+            : "",
         personality:
-          requestedFields.size === 0 || requestedFields.has("personality")
+          allowFieldSuggestions &&
+          (requestedFields.size === 0 || requestedFields.has("personality"))
             ? clampText(finalSuggestionsSource.personality, 1000)
             : "",
         background:
-          requestedFields.size === 0 || requestedFields.has("background")
+          allowFieldSuggestions && (requestedFields.size === 0 || requestedFields.has("background"))
             ? clampText(finalSuggestionsSource.background, 1800)
             : "",
         physicalDescription:
-          requestedFields.size === 0 || requestedFields.has("physicalDescription")
+          allowFieldSuggestions &&
+          (requestedFields.size === 0 || requestedFields.has("physicalDescription"))
             ? clampText(finalSuggestionsSource.physicalDescription, 700)
             : "",
       },
       options: {
+        nameOptions,
         personalityOptions,
         backgroundOptions,
         physicalDescriptionOptions,
@@ -251,6 +318,7 @@ export async function POST(req: NextRequest) {
       meta: {
         retryUsed,
         targetField: explicitTargetField,
+        allowFieldSuggestions,
       },
     });
   } catch {
@@ -259,10 +327,11 @@ export async function POST(req: NextRequest) {
         message: {
           role: "assistant",
           content:
-            "I couldn't generate coaching suggestions right now. Try asking for one field at a time (personality, background, or physical description).",
+            "I couldn't generate coaching suggestions right now. Try asking for one field at a time (name, personality, background, or physical description).",
         } satisfies CoachMessage,
         suggestions: {},
         options: {
+          nameOptions: [],
           personalityOptions: [],
           backgroundOptions: [],
           physicalDescriptionOptions: [],

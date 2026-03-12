@@ -3,6 +3,11 @@ import { prisma } from "@/lib/prisma";
 import { normalizePartyState } from "@/lib/party";
 import { normalizeCombatState } from "@/lib/combat";
 import {
+  buildInitialCampaignBootstrap,
+  normalizeCampaignBootstrap,
+  projectCampaignBootstrapForPlayer,
+} from "@/lib/campaign-bootstrap";
+import {
   normalizeSceneImageHistory,
   normalizeSceneMapState,
   normalizeWorldMapHistory,
@@ -34,6 +39,11 @@ export async function GET(_req: NextRequest, context: RouteContext) {
           { id: "asc" },
         ],
       },
+      messages: {
+        orderBy: { createdAt: "asc" },
+        take: 1,
+        select: { content: true },
+      },
     },
   });
 
@@ -57,12 +67,23 @@ export async function GET(_req: NextRequest, context: RouteContext) {
           : normalizedBaseProgressionState.currency,
     },
   });
+  const fallbackBootstrap = buildInitialCampaignBootstrap({
+    title: campaign.title,
+    ruleset: campaign.ruleset,
+    startingScenario: campaign.messages[0]?.content ?? "",
+  });
+  const bootstrap = normalizeCampaignBootstrap(
+    (campaign as { bootstrapJson?: unknown }).bootstrapJson,
+    fallbackBootstrap,
+  );
 
   return NextResponse.json({
     campaign: {
       id: campaign.id,
       title: campaign.title,
       ruleset: campaign.ruleset,
+      bootstrapVersion: bootstrap.schemaVersion,
+      bootstrapPublicJson: projectCampaignBootstrapForPlayer(bootstrap),
       chatModel: normalizeCampaignChatModel(
         (campaign as { chatModel?: unknown }).chatModel,
       ),
@@ -121,6 +142,7 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     body,
     "progressionEvents",
   );
+  const hasBootstrap = Object.prototype.hasOwnProperty.call(body, "bootstrap");
 
   if (
     hasPartyState ||
@@ -131,18 +153,35 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
     hasCombatState ||
     hasChatModel ||
     hasProgressionState ||
-    hasProgressionEvents
+    hasProgressionEvents ||
+    hasBootstrap
   ) {
     const existingCampaign = await prisma.campaign.findUnique({
       where: { id },
       select: {
         id: true,
+        title: true,
+        ruleset: true,
+        messages: {
+          orderBy: { createdAt: "asc" },
+          take: 1,
+          select: { content: true },
+        },
       },
     });
 
     if (!existingCampaign) {
       return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
     }
+
+    const fallbackBootstrap = buildInitialCampaignBootstrap({
+      title: existingCampaign.title,
+      ruleset: existingCampaign.ruleset,
+      startingScenario: existingCampaign.messages[0]?.content ?? "",
+    });
+    const normalizedBootstrap = hasBootstrap
+      ? normalizeCampaignBootstrap(body.bootstrap, fallbackBootstrap)
+      : null;
 
     const updatedCampaign = await prisma.campaign.update({
       where: { id },
@@ -196,6 +235,11 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
               ),
             }
           : {}),
+        ...(normalizedBootstrap
+          ? {
+              bootstrapJson: normalizedBootstrap,
+            }
+          : {}),
       } as never,
       include: {
         characters: {
@@ -207,11 +251,17 @@ export async function PATCH(req: NextRequest, context: RouteContext) {
       },
     });
 
+    const updatedBootstrap = normalizeCampaignBootstrap(
+      (updatedCampaign as { bootstrapJson?: unknown }).bootstrapJson,
+      fallbackBootstrap,
+    );
     return NextResponse.json({
       campaign: {
         id: updatedCampaign.id,
         title: updatedCampaign.title,
         ruleset: updatedCampaign.ruleset,
+        bootstrapVersion: updatedBootstrap.schemaVersion,
+        bootstrapPublicJson: projectCampaignBootstrapForPlayer(updatedBootstrap),
         chatModel: normalizeCampaignChatModel(
           (updatedCampaign as { chatModel?: unknown }).chatModel,
         ),
@@ -332,17 +382,28 @@ export async function DELETE(_req: NextRequest, context: RouteContext) {
     return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
   }
 
-  await prisma.$transaction([
-    prisma.message.deleteMany({
-      where: { campaignId: id },
-    }),
-    prisma.character.deleteMany({
-      where: { campaignId: id },
-    }),
-    prisma.campaign.delete({
-      where: { id },
-    }),
-  ]);
+  await prisma.$transaction(
+    async (tx) => {
+      // Campaign deletes can be slow on large histories; raise statement timeout locally.
+      await tx.$executeRawUnsafe("SET LOCAL statement_timeout = '10min'");
+
+      await tx.message.deleteMany({
+        where: { campaignId: id },
+      });
+
+      await tx.character.deleteMany({
+        where: { campaignId: id },
+      });
+
+      await tx.campaign.delete({
+        where: { id },
+      });
+    },
+    {
+      maxWait: 15_000,
+      timeout: 10 * 60 * 1000,
+    },
+  );
 
   return NextResponse.json({ success: true });
 }

@@ -11,6 +11,8 @@ model Campaign {
   title      String
   ruleset    String
   chatModel  String      @default("gpt-4o-mini")
+  bootstrapVersion Int   @default(1)
+  bootstrapJson Json?
   progressionStateJson Json?
   progressionEventsJson Json?
   partyStateJson Json?
@@ -48,6 +50,8 @@ model Character {
   sheetJson              Json
   memorySummary          String?
   isMainCharacter        Boolean           @default(false)
+
+  @@index([campaignId])
 }
 
 model Message {
@@ -58,4 +62,6 @@ model Message {
   role        String   // user, gm, companion
   content     String
   createdAt   DateTime @default(now())
+
+  @@index([campaignId])
 }

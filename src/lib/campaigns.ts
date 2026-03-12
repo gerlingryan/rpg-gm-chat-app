@@ -39,8 +39,118 @@ const CHARACTER_TEXTAREA_LIMITS: Record<string, number> = {
   background: 1800,
 };
 
+const DND_STANDARD_ARRAY = [15, 14, 13, 12, 10, 8] as const;
+const DND_POINT_BUY_COST_BY_SCORE: Record<number, number> = {
+  8: 0,
+  9: 1,
+  10: 2,
+  11: 3,
+  12: 4,
+  13: 5,
+  14: 7,
+  15: 9,
+};
+
+const DEADLANDS_TRAIT_KEYS = [
+  "deftness",
+  "nimbleness",
+  "quickness",
+  "strength",
+  "vigor",
+  "cognition",
+  "knowledge",
+  "mien",
+  "smarts",
+  "spirit",
+] as const;
+
+const DEADLANDS_SKILL_POINT_COST_BY_DIE: Record<number, number> = {
+  4: 1,
+  6: 2,
+  8: 3,
+  10: 4,
+  12: 5,
+};
+
+const DEADLANDS_DEFAULT_TRAIT_BUDGET = 30;
+const DEADLANDS_DEFAULT_SKILL_POINT_BUDGET = 9;
+
+function normalizeDeadlandsSkillDie(value: number, fallback: number) {
+  const allowed = [4, 6, 8, 10, 12];
+  const normalized = Math.max(4, Math.min(12, Math.trunc(value)));
+  if (allowed.includes(normalized)) {
+    return normalized;
+  }
+  return fallback;
+}
+
+function getDeadlandsSkillPointCost(dieSides: number) {
+  return DEADLANDS_SKILL_POINT_COST_BY_DIE[dieSides] ?? 0;
+}
+
 function getCharacterTextareaLimit(id: string) {
   return CHARACTER_TEXTAREA_LIMITS[id];
+}
+
+function getDndPointBuySpent(scores: number[]) {
+  return scores.reduce((total, score) => {
+    const normalizedScore = Math.max(8, Math.min(15, Math.trunc(score)));
+    return total + (DND_POINT_BUY_COST_BY_SCORE[normalizedScore] ?? 0);
+  }, 0);
+}
+
+function getDndAbilityModifier(score: number) {
+  return Math.floor((score - 10) / 2);
+}
+
+function getDndAsiBonuses(params: {
+  ancestry: string;
+  abilityScoreRuleSet: string;
+  asiPlusTwo: string;
+  asiPlusOne: string;
+}) {
+  const bonuses = {
+    str: 0,
+    dex: 0,
+    con: 0,
+    int: 0,
+    wis: 0,
+    cha: 0,
+  };
+
+  if (params.abilityScoreRuleSet === "modern-flexible") {
+    if (params.asiPlusTwo in bonuses) {
+      bonuses[params.asiPlusTwo as keyof typeof bonuses] += 2;
+    }
+    if (params.asiPlusOne in bonuses) {
+      bonuses[params.asiPlusOne as keyof typeof bonuses] += 1;
+    }
+    return bonuses;
+  }
+
+  const legacyBonuses: Record<string, Partial<typeof bonuses>> = {
+    Aasimar: { cha: 2, wis: 1 },
+    Dragonborn: { str: 2, cha: 1 },
+    Dwarf: { con: 2, wis: 1 },
+    Elf: { dex: 2, int: 1 },
+    Gnome: { int: 2, dex: 1 },
+    Goliath: { str: 2, con: 1 },
+    "Half-Elf": { cha: 2, dex: 1, con: 1 },
+    "Half-Orc": { str: 2, con: 1 },
+    Halfling: { dex: 2, cha: 1 },
+    Human: { str: 1, dex: 1, con: 1, int: 1, wis: 1, cha: 1 },
+    Orc: { str: 2, con: 1 },
+    Tiefling: { cha: 2, int: 1 },
+  };
+
+  const selectedLegacy = legacyBonuses[params.ancestry] ?? {};
+  for (const [key, value] of Object.entries(selectedLegacy)) {
+    if (key in bonuses && typeof value === "number" && Number.isFinite(value)) {
+      bonuses[key as keyof typeof bonuses] += value;
+    }
+  }
+
+  return bonuses;
 }
 
 function truncateTextToMaxLength(value: string, maxLength: number) {
@@ -421,6 +531,9 @@ function createSelectQuestion(
   label: string,
   options: CharacterQuestionOption[],
   helpText?: string,
+  showWhen?: (
+    answers: Record<string, string | number | null | undefined>,
+  ) => boolean,
 ): CharacterQuestion {
   return {
     id,
@@ -430,6 +543,7 @@ function createSelectQuestion(
     defaultValue: options[0]?.value ?? "",
     options,
     helpText,
+    showWhen,
   };
 }
 
@@ -533,12 +647,59 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Stout", label: "Stout / resilient" },
         { value: "Shadow-touched", label: "Shadow-touched" },
       ]),
-      createNumberQuestion("str", "Strength", 8, 20, 14),
-      createNumberQuestion("dex", "Dexterity", 8, 20, 12),
-      createNumberQuestion("con", "Constitution", 8, 20, 13),
-      createNumberQuestion("int", "Intelligence", 8, 20, 10),
-      createNumberQuestion("wis", "Wisdom", 8, 20, 10),
-      createNumberQuestion("cha", "Charisma", 8, 20, 10),
+      createSelectQuestion(
+        "abilityScoreRuleSet",
+        "Ancestry ability score rule",
+        [
+          { value: "legacy-fixed", label: "Legacy fixed ancestry bonuses" },
+          { value: "modern-flexible", label: "Modern flexible (+2 and +1)" },
+        ],
+      ),
+      createSelectQuestion(
+        "asiPlusTwo",
+        "Flexible +2 ability",
+        [
+          { value: "str", label: "Strength" },
+          { value: "dex", label: "Dexterity" },
+          { value: "con", label: "Constitution" },
+          { value: "int", label: "Intelligence" },
+          { value: "wis", label: "Wisdom" },
+          { value: "cha", label: "Charisma" },
+        ],
+        "Used for modern flexible ancestry bonuses.",
+        (answers) => getAnswerString(answers, "abilityScoreRuleSet", "legacy-fixed") === "modern-flexible",
+      ),
+      createSelectQuestion(
+        "asiPlusOne",
+        "Flexible +1 ability",
+        [
+          { value: "str", label: "Strength" },
+          { value: "dex", label: "Dexterity" },
+          { value: "con", label: "Constitution" },
+          { value: "int", label: "Intelligence" },
+          { value: "wis", label: "Wisdom" },
+          { value: "cha", label: "Charisma" },
+        ],
+        "Used for modern flexible ancestry bonuses (must differ from +2).",
+        (answers) => getAnswerString(answers, "abilityScoreRuleSet", "legacy-fixed") === "modern-flexible",
+      ),
+      createSelectQuestion(
+        "abilityGenerationMethod",
+        "Ability generation method",
+        [
+          { value: "manual-enter", label: "Manual entry" },
+          { value: "standard-array", label: "Standard Array (15,14,13,12,10,8)" },
+          { value: "point-buy", label: "Point Buy (27 points)" },
+          { value: "roll-4d6", label: "Roll 4d6, drop lowest" },
+        ],
+        "Choose how your six ability scores are determined.",
+      ),
+      createNumberQuestion("str", "Strength", 3, 20, 14),
+      createNumberQuestion("dex", "Dexterity", 3, 20, 12),
+      createNumberQuestion("con", "Constitution", 3, 20, 13),
+      createNumberQuestion("int", "Intelligence", 3, 20, 10),
+      createNumberQuestion("wis", "Wisdom", 3, 20, 10),
+      createNumberQuestion("cha", "Charisma", 3, 20, 10),
       createSelectQuestion("mainHand", "Main-hand weapon", [
         { value: "None", label: "None" },
         { value: "Battleaxe", label: "Battleaxe" },
@@ -837,6 +998,22 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Prospector", label: "Prospector" },
         { value: "Showman / Entertainer", label: "Showman / Entertainer" },
       ]),
+      createSelectQuestion(
+        "traitGenerationMethod",
+        "Trait generation method",
+        [
+          { value: "standard-novice", label: "Standard novice (30 points)" },
+          { value: "custom-budget", label: "Custom trait budget" },
+          { value: "manual-open", label: "Manual open (advanced)" },
+        ],
+      ),
+      createNumberQuestion(
+        "traitPointBudget",
+        "Trait point budget",
+        24,
+        40,
+        DEADLANDS_DEFAULT_TRAIT_BUDGET,
+      ),
       createNumberQuestion("deftness", "Deftness", 1, 5, 3),
       createNumberQuestion("nimbleness", "Nimbleness", 1, 5, 3),
       createNumberQuestion("quickness", "Quickness", 1, 5, 3),
@@ -881,6 +1058,31 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Horse Ridin'", label: "Horse Ridin'" },
         { value: "Sneak", label: "Sneak" },
       ]),
+      createSelectQuestion("primarySkillDie", "Primary skill die", [
+        { value: "6", label: "d6" },
+        { value: "8", label: "d8" },
+        { value: "10", label: "d10" },
+        { value: "12", label: "d12" },
+      ]),
+      createSelectQuestion("secondarySkillDie", "Secondary skill die", [
+        { value: "4", label: "d4" },
+        { value: "6", label: "d6" },
+        { value: "8", label: "d8" },
+        { value: "10", label: "d10" },
+        { value: "12", label: "d12" },
+      ]),
+      createSelectQuestion("skillBaseDie", "Default skill die", [
+        { value: "4", label: "d4" },
+        { value: "6", label: "d6" },
+        { value: "8", label: "d8" },
+      ]),
+      createNumberQuestion(
+        "skillPointBudget",
+        "Skill point budget",
+        4,
+        20,
+        DEADLANDS_DEFAULT_SKILL_POINT_BUDGET,
+      ),
       createSelectQuestion("edgeOne", "Edge 1", [
         { value: "Quick Draw", label: "Quick Draw" },
         { value: "Nerves o' Steel", label: "Nerves o' Steel" },
@@ -1020,6 +1222,21 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
         { value: "Nerves o' Steel", label: "Nerves o' Steel" },
         { value: "Veteran Resolve", label: "Veteran Resolve" },
       ]),
+      createSelectQuestion("overridePaceEnabled", "Override pace", [
+        { value: "false", label: "No" },
+        { value: "true", label: "Yes" },
+      ]),
+      createNumberQuestion("overridePace", "Override pace value", 1, 20, 6),
+      createSelectQuestion("overrideWindEnabled", "Override wind", [
+        { value: "false", label: "No" },
+        { value: "true", label: "Yes" },
+      ]),
+      createNumberQuestion("overrideWind", "Override wind value", 0, 40, 11),
+      createSelectQuestion("overrideGritEnabled", "Override grit", [
+        { value: "false", label: "No" },
+        { value: "true", label: "Yes" },
+      ]),
+      createNumberQuestion("overrideGrit", "Override grit value", 0, 10, 2),
       createAgeQuestion(),
       createGenderQuestion(),
       createTextareaQuestion("background", "Trouble trailing behind them", "", undefined, 8000),
@@ -1032,6 +1249,18 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
     ) => getAnswerString(answers, "archetype", "Gunslinger") === value;
 
     return questions.map((question) => {
+      if (question.id === "traitPointBudget") {
+        return {
+          ...question,
+          showWhen: (answers) =>
+            getAnswerString(
+              answers,
+              "traitGenerationMethod",
+              "standard-novice",
+            ) === "custom-budget",
+        };
+      }
+
       if (["blessedMiracleOne", "blessedMiracleTwo"].includes(question.id)) {
         return { ...question, showWhen: archetypeIs("Blessed") };
       }
@@ -1055,6 +1284,30 @@ export function getCharacterQuestionnaire(ruleset: string): CharacterQuestion[] 
             ["Blessed", "Huckster", "Shaman", "Mad Scientist"].includes(
               getAnswerString(answers, "archetype", "Gunslinger"),
             ),
+        };
+      }
+
+      if (question.id === "overridePace") {
+        return {
+          ...question,
+          showWhen: (answers) =>
+            getAnswerString(answers, "overridePaceEnabled", "false") === "true",
+        };
+      }
+
+      if (question.id === "overrideWind") {
+        return {
+          ...question,
+          showWhen: (answers) =>
+            getAnswerString(answers, "overrideWindEnabled", "false") === "true",
+        };
+      }
+
+      if (question.id === "overrideGrit") {
+        return {
+          ...question,
+          showWhen: (answers) =>
+            getAnswerString(answers, "overrideGritEnabled", "false") === "true",
         };
       }
 
@@ -1279,6 +1532,22 @@ export function getVisibleCharacterQuestions(
 
       const selectedClass = getAnswerString(answers, "class", "Wizard");
       const spellVerb = isDndPreparedCaster(selectedClass) ? "Prepared" : "Known";
+      const selectedPlusTwo = getAnswerString(answers, "asiPlusTwo", "str");
+      const selectedPlusOne = getAnswerString(answers, "asiPlusOne", "con");
+
+      if (question.id === "asiPlusTwo" && question.options) {
+        return {
+          ...question,
+          options: question.options.filter((option) => option.value !== selectedPlusOne),
+        };
+      }
+
+      if (question.id === "asiPlusOne" && question.options) {
+        return {
+          ...question,
+          options: question.options.filter((option) => option.value !== selectedPlusTwo),
+        };
+      }
 
       if (["cantripOne", "cantripTwo", "cantripThree"].includes(question.id)) {
         return {
@@ -1345,6 +1614,30 @@ function getAnswerNumber(
   return fallback;
 }
 
+function getAnswerBoolean(
+  answers: Record<string, string | number | null | undefined>,
+  key: string,
+  fallback = false,
+) {
+  const value = answers[key];
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "yes", "1", "on"].includes(normalized)) {
+      return true;
+    }
+    if (["false", "no", "0", "off"].includes(normalized)) {
+      return false;
+    }
+  }
+  return fallback;
+}
+
 function buildPersonalityText(
   answers: Record<string, string | number | null | undefined>,
 ) {
@@ -1367,6 +1660,15 @@ function buildPortraitDataUrl(
   answers: Record<string, string | number | null | undefined>,
 ) {
   const value = answers.portraitDataUrl;
+  return typeof value === "string" && value.startsWith("data:image/")
+    ? value
+    : "";
+}
+
+function buildTokenDataUrl(
+  answers: Record<string, string | number | null | undefined>,
+) {
+  const value = answers.tokenDataUrl;
   return typeof value === "string" && value.startsWith("data:image/")
     ? value
     : "";
@@ -1826,6 +2128,7 @@ export function validateCharacterAnswersDetailed(
   const sanitizedAnswers = sanitizeCharacterAnswersForLimits(answers);
   const normalizedRuleset = normalizeRuleset(ruleset);
   const questions = getVisibleCharacterQuestions(ruleset, sanitizedAnswers);
+  const visibleQuestionIds = new Set(questions.map((question) => question.id));
   const fieldErrors: Record<string, string> = {};
 
   const setFieldError = (fieldId: string, message: string) => {
@@ -1889,34 +2192,133 @@ export function validateCharacterAnswersDetailed(
     }
   }
 
+  if (normalizedRuleset === "d&d 5e") {
+    const abilityGenerationMethod = getAnswerString(
+      answers,
+      "abilityGenerationMethod",
+      "manual-enter",
+    );
+    const abilityScoreRuleSet = getAnswerString(
+      answers,
+      "abilityScoreRuleSet",
+      "legacy-fixed",
+    );
+    const abilityScores = {
+      str: getAnswerNumber(answers, "str", 14),
+      dex: getAnswerNumber(answers, "dex", 12),
+      con: getAnswerNumber(answers, "con", 13),
+      int: getAnswerNumber(answers, "int", 10),
+      wis: getAnswerNumber(answers, "wis", 10),
+      cha: getAnswerNumber(answers, "cha", 10),
+    };
+    const abilityScoreValues = Object.values(abilityScores);
+    const asiPlusTwo = getAnswerString(answers, "asiPlusTwo", "str");
+    const asiPlusOne = getAnswerString(answers, "asiPlusOne", "con");
+
+    if (abilityScoreRuleSet === "modern-flexible") {
+      const validAbilityIds = new Set(["str", "dex", "con", "int", "wis", "cha"]);
+      if (!validAbilityIds.has(asiPlusTwo)) {
+        setFieldError("asiPlusTwo", "Flexible +2 ability must be one of STR/DEX/CON/INT/WIS/CHA.");
+      }
+      if (!validAbilityIds.has(asiPlusOne)) {
+        setFieldError("asiPlusOne", "Flexible +1 ability must be one of STR/DEX/CON/INT/WIS/CHA.");
+      }
+      if (asiPlusTwo === asiPlusOne) {
+        setFieldError("asiPlusTwo", "Flexible +2 and +1 abilities must be different.");
+        setFieldError("asiPlusOne", "Flexible +2 and +1 abilities must be different.");
+      }
+    }
+
+    if (abilityGenerationMethod === "standard-array") {
+      const normalizedProvided = [...abilityScoreValues]
+        .map((value) => Math.trunc(value))
+        .sort((a, b) => b - a);
+      const normalizedStandardArray = [...DND_STANDARD_ARRAY].sort((a, b) => b - a);
+
+      const matchesStandardArray =
+        normalizedProvided.length === normalizedStandardArray.length &&
+        normalizedProvided.every((value, index) => value === normalizedStandardArray[index]);
+
+      if (!matchesStandardArray) {
+        setFieldError(
+          "abilityGenerationMethod",
+          "Standard Array requires scores 15, 14, 13, 12, 10, and 8 (each used once).",
+        );
+      }
+    }
+
+    if (abilityGenerationMethod === "point-buy") {
+      const outOfRangeAbility = Object.entries(abilityScores).find(
+        ([, score]) => score < 8 || score > 15,
+      );
+      if (outOfRangeAbility) {
+        setFieldError(
+          outOfRangeAbility[0],
+          "Point Buy base scores must be between 8 and 15.",
+        );
+      }
+
+      const spent = getDndPointBuySpent(abilityScoreValues);
+      if (spent > 27) {
+        setFieldError(
+          "abilityGenerationMethod",
+          `Point Buy overspent: ${spent}/27 points.`,
+        );
+      }
+    }
+
+    if (abilityGenerationMethod === "roll-4d6") {
+      const outOfRangeAbility = Object.entries(abilityScores).find(
+        ([, score]) => score < 3 || score > 18,
+      );
+      if (outOfRangeAbility) {
+        setFieldError(
+          outOfRangeAbility[0],
+          "Rolled ability scores must stay between 3 and 18.",
+        );
+      }
+    }
+  }
+
   if (normalizedRuleset === "deadlands classic") {
-    const traitKeys = [
-      "deftness",
-      "nimbleness",
-      "quickness",
-      "strength",
-      "vigor",
-      "cognition",
-      "knowledge",
-      "mien",
-      "smarts",
-      "spirit",
-    ] as const;
-    const traitValues = traitKeys.map((key) => getAnswerNumber(answers, key, 3));
+    const traitGenerationMethod = getAnswerString(
+      answers,
+      "traitGenerationMethod",
+      "standard-novice",
+    );
+    const traitPointBudget = Math.max(
+      24,
+      Math.min(40, getAnswerNumber(answers, "traitPointBudget", DEADLANDS_DEFAULT_TRAIT_BUDGET)),
+    );
+    const traitValues = DEADLANDS_TRAIT_KEYS.map((key) => getAnswerNumber(answers, key, 3));
     const traitTotal = traitValues.reduce((total, value) => total + value, 0);
 
-    // Phase B baseline budget: keep novice traits in a bounded range.
-    if (traitTotal > 34) {
+    if (traitGenerationMethod === "standard-novice" && traitTotal !== DEADLANDS_DEFAULT_TRAIT_BUDGET) {
       setFieldError(
         "deftness",
-        "Deadlands trait total is too high (maximum 34 for novice builds)",
+        `Standard novice trait allocation must total ${DEADLANDS_DEFAULT_TRAIT_BUDGET}.`,
+      );
+      setFieldError(
+        "traitGenerationMethod",
+        `Standard novice trait allocation must total ${DEADLANDS_DEFAULT_TRAIT_BUDGET}.`,
       );
     }
 
-    if (traitTotal < 24) {
+    if (traitGenerationMethod === "custom-budget" && traitTotal > traitPointBudget) {
       setFieldError(
         "deftness",
-        "Deadlands trait total is too low (minimum 24 for novice builds)",
+        `Trait allocation exceeds custom budget (${traitTotal}/${traitPointBudget}).`,
+      );
+      setFieldError(
+        "traitPointBudget",
+        `Trait allocation exceeds custom budget (${traitTotal}/${traitPointBudget}).`,
+      );
+    }
+
+    if (traitGenerationMethod !== "manual-open" && traitTotal < 24) {
+      setFieldError(
+        "deftness",
+        "Deadlands trait total is too low (minimum 24).",
       );
     }
 
@@ -1954,11 +2356,44 @@ export function validateCharacterAnswersDetailed(
     const arcanePool = getAnswerNumber(answers, "arcanePool", 3);
     const primarySkill = getAnswerString(answers, "primarySkill", "Shootin'");
     const secondarySkill = getAnswerString(answers, "secondarySkill", "Guts");
+    const primarySkillDie = normalizeDeadlandsSkillDie(
+      getAnswerNumber(answers, "primarySkillDie", 10),
+      10,
+    );
+    const secondarySkillDie = normalizeDeadlandsSkillDie(
+      getAnswerNumber(answers, "secondarySkillDie", 8),
+      8,
+    );
+    const skillBaseDie = normalizeDeadlandsSkillDie(
+      getAnswerNumber(answers, "skillBaseDie", 6),
+      6,
+    );
+    const skillPointBudget = Math.max(
+      4,
+      Math.min(20, getAnswerNumber(answers, "skillPointBudget", DEADLANDS_DEFAULT_SKILL_POINT_BUDGET)),
+    );
+    const skillPointSpent =
+      getDeadlandsSkillPointCost(primarySkillDie) +
+      getDeadlandsSkillPointCost(secondarySkillDie) +
+      getDeadlandsSkillPointCost(skillBaseDie);
     const guts = getAnswerNumber(answers, "guts", 2);
+    const spirit = getAnswerNumber(answers, "spirit", 3);
 
     if (primarySkill === secondarySkill) {
       setFieldError("primarySkill", "Primary and secondary skills must be different");
       setFieldError("secondarySkill", "Primary and secondary skills must be different");
+    }
+    if (primarySkillDie < secondarySkillDie) {
+      setFieldError(
+        "secondarySkillDie",
+        "Secondary skill die cannot exceed primary skill die.",
+      );
+    }
+    if (skillPointSpent > skillPointBudget) {
+      setFieldError(
+        "skillPointBudget",
+        `Skill allocation exceeds budget (${skillPointSpent}/${skillPointBudget}).`,
+      );
     }
 
     const arcaneArchetypes = new Set([
@@ -2053,6 +2488,25 @@ export function validateCharacterAnswersDetailed(
       if (arcanePool < 1) {
         setFieldError("arcanePool", "Arcane archetypes require at least 1 arcane point");
       }
+      if (arcanePool > spirit + 5) {
+        setFieldError(
+          "arcanePool",
+          "Arcane points are unusually high for current Spirit (recommended max Spirit + 5).",
+        );
+      }
+    } else {
+      if (arcanePool > 0) {
+        setFieldError(
+          "arcanePool",
+          "Non-arcane archetypes should keep arcane points at 0.",
+        );
+      }
+      if (distinctArcanePowers.length > 0) {
+        setFieldError(
+          "archetype",
+          "Non-arcane archetypes cannot select arcane powers.",
+        );
+      }
     }
 
     const legalHindrances = new Set([
@@ -2098,6 +2552,15 @@ export function validateCharacterAnswersDetailed(
       ["woundLeftLeg", woundLeftLeg],
       ["woundRightLeg", woundRightLeg],
     ] as const;
+    const overridePaceEnabled =
+      getAnswerString(answers, "overridePaceEnabled", "false") === "true";
+    const overrideWindEnabled =
+      getAnswerString(answers, "overrideWindEnabled", "false") === "true";
+    const overrideGritEnabled =
+      getAnswerString(answers, "overrideGritEnabled", "false") === "true";
+    const overridePace = getAnswerNumber(answers, "overridePace", 6);
+    const overrideWind = getAnswerNumber(answers, "overrideWind", 11);
+    const overrideGrit = getAnswerNumber(answers, "overrideGrit", 2);
     const fateWhite = getAnswerNumber(answers, "fateWhite", 2);
     const fateRed = getAnswerNumber(answers, "fateRed", 1);
     const fateBlue = getAnswerNumber(answers, "fateBlue", 0);
@@ -2119,6 +2582,15 @@ export function validateCharacterAnswersDetailed(
         setFieldError(fieldId, "Fate chip values must be between 0 and 10");
       }
     }
+    if (overridePaceEnabled && (overridePace < 1 || overridePace > 20)) {
+      setFieldError("overridePace", "Override pace must be between 1 and 20.");
+    }
+    if (overrideWindEnabled && (overrideWind < 0 || overrideWind > 40)) {
+      setFieldError("overrideWind", "Override wind must be between 0 and 40.");
+    }
+    if (overrideGritEnabled && (overrideGrit < 0 || overrideGrit > 10)) {
+      setFieldError("overrideGrit", "Override grit must be between 0 and 10.");
+    }
 
     if (woundIgnore === "Nerves o' Steel" && !selectedEdges.includes("Nerves o' Steel")) {
       setFieldError(
@@ -2130,13 +2602,33 @@ export function validateCharacterAnswersDetailed(
     if (woundIgnore === "Veteran Resolve" && guts < 4) {
       setFieldError("woundIgnore", "Veteran Resolve wound ignore requires Guts 4+");
     }
+
+    const highestWound = Math.max(
+      woundHead,
+      woundGuts,
+      woundLeftArm,
+      woundRightArm,
+      woundLeftLeg,
+      woundRightLeg,
+    );
+    const derivedWind = 6 + getAnswerNumber(answers, "vigor", 3) + guts;
+    const effectiveWind = overrideWindEnabled ? overrideWind : derivedWind;
+    if (highestWound >= 4 && effectiveWind > 0) {
+      setFieldError(
+        "woundGuts",
+        "Critical wounds with positive wind are inconsistent; set wind override to 0 or reduce wounds.",
+      );
+    }
   }
 
-  const firstError = Object.values(fieldErrors)[0] ?? "";
+  const visibleFieldErrors = Object.fromEntries(
+    Object.entries(fieldErrors).filter(([fieldId]) => visibleQuestionIds.has(fieldId)),
+  );
+  const firstError = Object.values(visibleFieldErrors)[0] ?? "";
 
   return {
     formError: firstError,
-    fieldErrors,
+    fieldErrors: visibleFieldErrors,
   };
 }
 
@@ -2152,6 +2644,11 @@ export function buildGeneratedCharacter(
     const backgroundText = background || "A capable figure stepping into danger.";
     const physicalDescriptionText = buildPhysicalDescriptionText(sanitizedAnswers);
     const portraitDataUrl = buildPortraitDataUrl(sanitizedAnswers);
+    const tokenDataUrl = buildTokenDataUrl(sanitizedAnswers);
+    const optionalImageFields = {
+      ...(portraitDataUrl ? { portraitDataUrl } : {}),
+      ...(tokenDataUrl ? { tokenDataUrl } : {}),
+    };
     const personalityText = buildPersonalityText(sanitizedAnswers);
     const age = getAnswerNumber(sanitizedAnswers, "age", 30);
     const gender = getAnswerString(sanitizedAnswers, "gender", "Other");
@@ -2161,13 +2658,72 @@ export function buildGeneratedCharacter(
     const characterClass = getAnswerString(answers, "class", "Fighter");
     const ancestry = getAnswerString(answers, "ancestry", "Human");
     const heritage = getAnswerString(answers, "heritage", "Standard");
-    const stats = {
+    const abilityScoreRuleSet = getAnswerString(
+      answers,
+      "abilityScoreRuleSet",
+      "legacy-fixed",
+    );
+    const asiPlusTwo = getAnswerString(answers, "asiPlusTwo", "str");
+    const asiPlusOne = getAnswerString(answers, "asiPlusOne", "con");
+    const abilityGenerationMethod = getAnswerString(
+      answers,
+      "abilityGenerationMethod",
+      "manual-enter",
+    );
+    const baseStats = {
       str: getAnswerNumber(answers, "str", 14),
       dex: getAnswerNumber(answers, "dex", 12),
       con: getAnswerNumber(answers, "con", 13),
       int: getAnswerNumber(answers, "int", 10),
       wis: getAnswerNumber(answers, "wis", 10),
       cha: getAnswerNumber(answers, "cha", 10),
+    };
+    const abilityScoreBonuses = getDndAsiBonuses({
+      ancestry,
+      abilityScoreRuleSet,
+      asiPlusTwo,
+      asiPlusOne,
+    });
+    const stats = {
+      str: Math.min(20, baseStats.str + abilityScoreBonuses.str),
+      dex: Math.min(20, baseStats.dex + abilityScoreBonuses.dex),
+      con: Math.min(20, baseStats.con + abilityScoreBonuses.con),
+      int: Math.min(20, baseStats.int + abilityScoreBonuses.int),
+      wis: Math.min(20, baseStats.wis + abilityScoreBonuses.wis),
+      cha: Math.min(20, baseStats.cha + abilityScoreBonuses.cha),
+    };
+    const abilityModifiers = {
+      str: getDndAbilityModifier(stats.str),
+      dex: getDndAbilityModifier(stats.dex),
+      con: getDndAbilityModifier(stats.con),
+      int: getDndAbilityModifier(stats.int),
+      wis: getDndAbilityModifier(stats.wis),
+      cha: getDndAbilityModifier(stats.cha),
+    };
+    const pointBuySpent = getDndPointBuySpent(Object.values(baseStats));
+    const usesStandardArray =
+      [...Object.values(baseStats)].sort((a, b) => b - a).join(",") ===
+      [...DND_STANDARD_ARRAY].sort((a, b) => b - a).join(",");
+    const pointBuyLegal =
+      abilityGenerationMethod === "point-buy" &&
+      Object.values(baseStats).every((score) => score >= 8 && score <= 15) &&
+      pointBuySpent <= 27;
+    const abilityRollSeed =
+      abilityGenerationMethod === "roll-4d6"
+        ? getAnswerString(answers, "abilityRollSeed", "")
+        : "";
+    const abilityGenerationSummary = {
+      method: abilityGenerationMethod,
+      abilityScoreRuleSet,
+      ancestry,
+      flexibleBonuses:
+        abilityScoreRuleSet === "modern-flexible"
+          ? { plusTwo: asiPlusTwo, plusOne: asiPlusOne }
+          : undefined,
+      standardArrayMatch: usesStandardArray,
+      pointBuySpent,
+      pointBuyLegal,
+      ...(abilityRollSeed ? { rollSeed: abilityRollSeed } : {}),
     };
     const fightingStyle = getAnswerString(answers, "fightingStyle", "Defense");
     const rogueTalent = getAnswerString(answers, "rogueTalent", "Stealth");
@@ -2293,11 +2849,11 @@ export function buildGeneratedCharacter(
       "Warlock",
       "Wizard",
     ]);
-    const dexMod = Math.floor((stats.dex - 10) / 2);
-    const conMod = Math.floor((stats.con - 10) / 2);
-    const wisMod = Math.floor((stats.wis - 10) / 2);
+    const dexMod = abilityModifiers.dex;
+    const conMod = abilityModifiers.con;
+    const wisMod = abilityModifiers.wis;
     const armorProfile = armorBase[armor] ?? armorBase["No Armor"];
-    const hp =
+    const computedHpMax =
       (classHitDie[characterClass] ?? 8) +
       Math.max(1, conMod) +
       Math.max(0, level - 1) * (Math.floor((classHitDie[characterClass] ?? 8) / 2) + 1 + Math.max(1, conMod));
@@ -2305,22 +2861,22 @@ export function buildGeneratedCharacter(
       armorProfile.dexCap === null
         ? Math.max(0, dexMod)
         : Math.max(0, Math.min(dexMod, armorProfile.dexCap));
-    let ac = armorProfile.base + armorDexBonus;
+    let computedAc = armorProfile.base + armorDexBonus;
     if (characterClass === "Barbarian" && armor === "No Armor") {
-      ac = 10 + Math.max(0, dexMod) + Math.max(0, conMod);
+      computedAc = 10 + Math.max(0, dexMod) + Math.max(0, conMod);
     }
     if (characterClass === "Monk" && armor === "No Armor") {
-      ac = 10 + Math.max(0, dexMod) + Math.max(0, wisMod);
+      computedAc = 10 + Math.max(0, dexMod) + Math.max(0, wisMod);
     }
     if (
       fightingStyle === "Defense" &&
       ["Fighter", "Paladin", "Ranger"].includes(characterClass) &&
       armor !== "No Armor"
     ) {
-      ac += 1;
+      computedAc += 1;
     }
     if (shieldEquipped) {
-      ac += 2;
+      computedAc += 2;
     }
     const knownCantrips = [cantripOne, cantripTwo, cantripThree].filter(
       (spell, index, values) =>
@@ -2528,14 +3084,47 @@ export function buildGeneratedCharacter(
           : spellcastingAbility === "Charisma"
             ? Math.floor((stats.cha - 10) / 2)
             : 0;
-    const spellAttackBonus =
+    const computedSpellAttackBonus =
       spellcastingAbility === "None"
         ? null
         : proficiencyBonus + spellcastingAbilityMod;
-    const spellSaveDc =
+    const computedSpellSaveDc =
       spellcastingAbility === "None"
         ? null
         : 8 + proficiencyBonus + spellcastingAbilityMod;
+    const derivedOverrides = {
+      hpMax: getAnswerBoolean(answers, "overrideHpMaxEnabled", false),
+      ac: getAnswerBoolean(answers, "overrideAcEnabled", false),
+      spellAttackBonus: getAnswerBoolean(answers, "overrideSpellAttackBonusEnabled", false),
+      spellSaveDc: getAnswerBoolean(answers, "overrideSpellSaveDcEnabled", false),
+    };
+    const hpMax = derivedOverrides.hpMax
+      ? Math.max(1, getAnswerNumber(answers, "overrideHpMax", computedHpMax))
+      : computedHpMax;
+    const ac = derivedOverrides.ac
+      ? Math.max(1, getAnswerNumber(answers, "overrideAc", computedAc))
+      : computedAc;
+    const spellAttackBonus = derivedOverrides.spellAttackBonus
+      ? getAnswerNumber(answers, "overrideSpellAttackBonus", computedSpellAttackBonus ?? 0)
+      : computedSpellAttackBonus;
+    const spellSaveDc = derivedOverrides.spellSaveDc
+      ? getAnswerNumber(answers, "overrideSpellSaveDc", computedSpellSaveDc ?? 10)
+      : computedSpellSaveDc;
+    const derivedStats = {
+      computed: {
+        hpMax: computedHpMax,
+        ac: computedAc,
+        spellAttackBonus: computedSpellAttackBonus,
+        spellSaveDc: computedSpellSaveDc,
+      },
+      applied: {
+        hpMax,
+        ac,
+        spellAttackBonus,
+        spellSaveDc,
+      },
+      overrides: derivedOverrides,
+    };
     const spellData = hasDndSpellcastingSlots(characterClass, level)
       ? {
           cantrips: spellcastingClasses.has(characterClass) ? knownCantrips : [],
@@ -2577,7 +3166,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -2585,7 +3174,7 @@ export function buildGeneratedCharacter(
         ancestry,
         heritage,
         level,
-        hp: { current: hp, max: hp },
+        hp: { current: hpMax, max: hpMax },
         ac,
         speed:
           ancestry === "Dwarf" || ancestry === "Halfling" || ancestry === "Gnome"
@@ -2615,13 +3204,24 @@ export function buildGeneratedCharacter(
         spellcastingAbility,
         spellAttackBonus,
         spellSaveDc,
+        derivedStats,
         spells: spellData,
         resources: classResources,
         spellSlots:
           hasDndSpellcastingSlots(characterClass, level)
             ? buildDndSpellSlots(characterClass, level)
             : {},
+        abilityScoreRuleSet,
+        asiPlusTwo: abilityScoreRuleSet === "modern-flexible" ? asiPlusTwo : undefined,
+        asiPlusOne: abilityScoreRuleSet === "modern-flexible" ? asiPlusOne : undefined,
+        abilityScoreBonuses,
+        abilityGenerationMethod,
+        ...(abilityRollSeed ? { abilityRollSeed } : {}),
+        pointBuySpent,
+        baseStats,
+        abilityGenerationSummary,
         stats,
+        abilityModifiers,
       },
       memorySummary: appendPersonalitySummary(
         `${cleanName} is a level ${level} ${ancestry.toLowerCase()} ${characterClass.toLowerCase()} shaped by ${backgroundText.toLowerCase()}. Key features include ${(combatFeatures[0] ?? "solid fundamentals").toLowerCase()}${combatFeatures[1] ? ` and ${combatFeatures[1].toLowerCase()}` : ""}.`,
@@ -2663,6 +3263,15 @@ export function buildGeneratedCharacter(
     );
     const madScienceInventionTwo = getAnswerString(answers, "madScienceInventionTwo", "None");
     const arcanePool = getAnswerNumber(answers, "arcanePool", 3);
+    const traitGenerationMethod = getAnswerString(
+      answers,
+      "traitGenerationMethod",
+      "standard-novice",
+    );
+    const traitPointBudget = Math.max(
+      24,
+      Math.min(40, getAnswerNumber(answers, "traitPointBudget", DEADLANDS_DEFAULT_TRAIT_BUDGET)),
+    );
     const guts = getAnswerNumber(answers, "guts", 2);
     const deftness = getAnswerNumber(answers, "deftness", 3);
     const nimbleness = getAnswerNumber(answers, "nimbleness", 3);
@@ -2676,6 +3285,22 @@ export function buildGeneratedCharacter(
     const spirit = getAnswerNumber(answers, "spirit", 3);
     const primarySkill = getAnswerString(answers, "primarySkill", "Shootin'");
     const secondarySkill = getAnswerString(answers, "secondarySkill", "Guts");
+    const primarySkillDie = normalizeDeadlandsSkillDie(
+      getAnswerNumber(answers, "primarySkillDie", 10),
+      10,
+    );
+    const secondarySkillDie = normalizeDeadlandsSkillDie(
+      getAnswerNumber(answers, "secondarySkillDie", 8),
+      8,
+    );
+    const skillBaseDie = normalizeDeadlandsSkillDie(
+      getAnswerNumber(answers, "skillBaseDie", 6),
+      6,
+    );
+    const skillPointBudget = Math.max(
+      4,
+      Math.min(20, getAnswerNumber(answers, "skillPointBudget", DEADLANDS_DEFAULT_SKILL_POINT_BUDGET)),
+    );
     const mainHand = getAnswerString(answers, "mainHand", "Colt Peacemaker");
     const offHand = getAnswerString(answers, "offHand", "None");
     const longarm = getAnswerString(answers, "longarm", "None");
@@ -2730,6 +3355,26 @@ export function buildGeneratedCharacter(
       10;
     const pace = Math.max(6, 6 + Math.floor((quickness - 3) / 2));
     const wind = 6 + vigor + guts + Math.max(0, Math.floor((traitAverage - 3) / 2));
+    const overridePaceEnabled =
+      getAnswerString(answers, "overridePaceEnabled", "false") === "true";
+    const overrideWindEnabled =
+      getAnswerString(answers, "overrideWindEnabled", "false") === "true";
+    const overrideGritEnabled =
+      getAnswerString(answers, "overrideGritEnabled", "false") === "true";
+    const overridePace = Math.max(1, Math.min(20, getAnswerNumber(answers, "overridePace", pace)));
+    const overrideWind = Math.max(0, Math.min(40, getAnswerNumber(answers, "overrideWind", wind)));
+    const overrideGrit = Math.max(0, Math.min(10, getAnswerNumber(answers, "overrideGrit", guts)));
+    const appliedPace = overridePaceEnabled ? overridePace : pace;
+    const appliedWind = overrideWindEnabled ? overrideWind : wind;
+    const appliedGrit = overrideGritEnabled ? overrideGrit : guts;
+    const traitTotal = DEADLANDS_TRAIT_KEYS.reduce(
+      (total, key) => total + getAnswerNumber(answers, key, 3),
+      0,
+    );
+    const skillPointSpent =
+      getDeadlandsSkillPointCost(primarySkillDie) +
+      getDeadlandsSkillPointCost(secondarySkillDie) +
+      getDeadlandsSkillPointCost(skillBaseDie);
     const baseSkills = [primarySkill, secondarySkill, "Guts", "Dodge"];
     const archetypeSkills: Record<string, string[]> = {
       Gunslinger: ["Shootin'", "Quick Draw", "Dodge"],
@@ -2748,6 +3393,66 @@ export function buildGeneratedCharacter(
     const selectedSkills = [
       ...new Set([...(archetypeSkills[archetype] ?? []), ...baseSkills]),
     ];
+    const buildDeadlandsSkillDieStorage = () => {
+      const normalizeSkillKey = (value: string) =>
+        value
+          .trim()
+          .toLowerCase()
+          .replace(/['’]/g, "")
+          .replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+      const knownRangedSkills = new Set([
+        "shootin",
+        "shooting",
+        "hexslingin",
+        "hexslingin",
+        "faith",
+        "mad_science",
+      ]);
+      const knownMeleeSkills = new Set([
+        "fightin",
+        "fighting",
+        "brawlin",
+        "brawling",
+      ]);
+      const skillDice: Record<string, number> = {};
+
+      for (const skill of selectedSkills) {
+        const key = normalizeSkillKey(skill);
+        if (!key) {
+          continue;
+        }
+        skillDice[key] = skillBaseDie;
+      }
+
+      const primaryKey = normalizeSkillKey(primarySkill);
+      const secondaryKey = normalizeSkillKey(secondarySkill);
+      if (primaryKey) {
+        skillDice[primaryKey] = primarySkillDie;
+      }
+      if (secondaryKey) {
+        skillDice[secondaryKey] = Math.max(skillDice[secondaryKey] ?? 0, secondarySkillDie);
+      }
+
+      if (knownRangedSkills.has(primaryKey)) {
+        skillDice.shootin = Math.max(skillDice.shootin ?? 0, primarySkillDie);
+      } else if (knownRangedSkills.has(secondaryKey)) {
+        skillDice.shootin = Math.max(skillDice.shootin ?? 0, secondarySkillDie);
+      } else {
+        skillDice.shootin = Math.max(skillDice.shootin ?? 0, skillBaseDie);
+      }
+
+      if (knownMeleeSkills.has(primaryKey)) {
+        skillDice.fightin = Math.max(skillDice.fightin ?? 0, primarySkillDie);
+      } else if (knownMeleeSkills.has(secondaryKey)) {
+        skillDice.fightin = Math.max(skillDice.fightin ?? 0, secondarySkillDie);
+      } else {
+        skillDice.fightin = Math.max(skillDice.fightin ?? 0, skillBaseDie);
+      }
+
+      return skillDice;
+    };
+    const deadlandsSkillDice = buildDeadlandsSkillDieStorage();
     const arcanePowers =
       archetype === "Blessed"
         ? [blessedMiracleOne, blessedMiracleTwo]
@@ -2769,14 +3474,20 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
         archetype,
-        pace,
-        wind,
-        grit: guts,
+        pace: appliedPace,
+        wind: appliedWind,
+        grit: appliedGrit,
+        traitGenerationMethod,
+        traitPointBudget,
+        skillPointBudget,
+        primarySkillDie,
+        secondarySkillDie,
+        skillBaseDie,
         edgeOne,
         edgeTwo,
         hindranceOne,
@@ -2807,6 +3518,32 @@ export function buildGeneratedCharacter(
         primarySkill,
         secondarySkill,
         skills: selectedSkills,
+        skillDice: deadlandsSkillDice,
+        derivedStats: {
+          source: "computed",
+          overrides: {
+            pace: overridePaceEnabled,
+            wind: overrideWindEnabled,
+            grit: overrideGritEnabled,
+          },
+          defaults: {
+            pace,
+            wind,
+            grit: guts,
+          },
+          applied: {
+            pace: appliedPace,
+            wind: appliedWind,
+            grit: appliedGrit,
+          },
+        },
+        abilityGenerationSummary: {
+          method: traitGenerationMethod,
+          traitPointBudget,
+          traitPointSpent: traitTotal,
+          skillPointBudget,
+          skillPointSpent,
+        },
         equipment: [
           mainHand,
           offHand !== "None" ? offHand : "",
@@ -2875,7 +3612,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -2905,7 +3642,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -2947,7 +3684,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -2976,7 +3713,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -3013,7 +3750,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -3043,7 +3780,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -3079,7 +3816,7 @@ export function buildGeneratedCharacter(
         source: "user-generated",
         background: backgroundText,
         physicalDescription: physicalDescriptionText,
-        ...(portraitDataUrl ? { portraitDataUrl } : {}),
+        ...optionalImageFields,
           personality: personalityText,
           age,
           gender,
@@ -3112,7 +3849,7 @@ export function buildGeneratedCharacter(
       source: "user-generated",
       background: backgroundText,
       physicalDescription: physicalDescriptionText,
-      ...(portraitDataUrl ? { portraitDataUrl } : {}),
+      ...optionalImageFields,
         personality: personalityText,
         age,
         gender,

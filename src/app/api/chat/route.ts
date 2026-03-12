@@ -1,4 +1,4 @@
-import { NextRequest, NextResponse } from "next/server";
+﻿import { NextRequest, NextResponse } from "next/server";
 import { prisma } from "@/lib/prisma";
 import { openai } from "@/lib/openai";
 import { deriveBehaviorDirectives, deriveBehaviorSummary } from "@/lib/campaigns";
@@ -10,6 +10,8 @@ import {
   normalizeCombatState,
   type CombatState,
 } from "@/lib/combat";
+import { buildInitiativeState } from "@/lib/combat-engine";
+import { formatCombatBoundaryForPrompt } from "@/lib/combat-contract";
 import {
   extractSceneBlock,
   formatSceneBlock,
@@ -27,14 +29,23 @@ import {
 } from "@/lib/party";
 import { generateCampaignRecap } from "@/lib/recap";
 import { normalizeCampaignChatModel, type CampaignChatModel } from "@/lib/chat-model";
-
-const PROMPT_HIDDEN_SHEET_KEYS = new Set([
-  "source",
-  "portraitDataUrl",
-  "background",
-  "physicalDescription",
-  "personality",
-]);
+import {
+  applyCampaignBootstrapTurnUpdate,
+  extractCampaignBootstrapBlock,
+  formatCampaignBootstrapBlock,
+  normalizeCampaignBootstrapTurnUpdate,
+  type CampaignBootstrapTurnUpdate,
+} from "@/lib/campaign-bootstrap-reducer";
+import {
+  buildInitialCampaignBootstrap,
+  formatCampaignBootstrapForPrompt,
+  normalizeCampaignBootstrap,
+  projectCampaignBootstrapForPlayer,
+} from "@/lib/campaign-bootstrap";
+import {
+  resolveBootstrapTurnPolicy,
+  withBootstrapNoProgressStreak,
+} from "@/lib/bootstrap-loop-breaker";
 
 function truncatePromptText(value: string, maxLength: number) {
   if (value.length <= maxLength) {
@@ -565,7 +576,7 @@ function inferExactNamedEffectsFromNarration(
     const escapedName = character.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
     const snippets = Array.from(
       narrationText.matchAll(
-        new RegExp(`${escapedName}(?:['’]s)?[\\s\\S]{0,260}`, "gi"),
+        new RegExp(`${escapedName}(?:['â€™]s)?[\\s\\S]{0,260}`, "gi"),
       ),
     ).map((match) =>
       match[0].replace(/[*_`]/g, " ").replace(/\s+/g, " ").trim(),
@@ -615,31 +626,69 @@ function inferExactNamedEffectsFromNarration(
 async function requestStructuredGmResponse(input: Array<{
   role: "system" | "user";
   content: string;
-}>, characterSummary: string, characters: Array<{ name: string }>, chatModel: CampaignChatModel) {
+}>, characterSummary: string, characters: Array<{ name: string }>, chatModel: CampaignChatModel, options?: {
+  lowLatency?: boolean;
+}) {
+  const canonicalizeStructuredMarkers = (rawText: string) =>
+    rawText
+      .replace(/(^|\n)\s*S+C+E+N+E+\s*:/gi, "$1SCENE:")
+      .replace(/(^|\n)\s*E+N+D+S*C+E+N+E+\b/gi, "$1ENDSCENE")
+      .replace(/(^|\n)\s*E+N+D+S*C+E+E+N+E+\b/gi, "$1ENDSCENE");
+
+  const requestStart = Date.now();
+  const getVisibleResponseContent = (text: string) =>
+    extractStateBlock(
+      extractCampaignBootstrapBlock(
+        extractCombatBlock(extractPartyBlock(extractSceneBlock(text).content).content).content,
+      ).content,
+    ).content.trim();
+  const hasAcceptableStructuredReply = (
+    extractedParty: ReturnType<typeof extractPartyBlock>,
+    extractedState: ReturnType<typeof extractStateBlock>,
+  ) =>
+    extractedParty.found &&
+    extractedState.found &&
+    (extractedState.updates.length > 0 ||
+      !narrationSuggestsTrackedStateChange(extractedState.content));
+
+  const firstCallStart = Date.now();
   const firstResponse = await openai.responses.create({
     model: chatModel,
     input,
   });
-  const firstText =
-    firstResponse.output_text ?? "The GM pauses, uncertain how to respond.";
+  const firstModelMs = Date.now() - firstCallStart;
+  const firstText = canonicalizeStructuredMarkers(
+    firstResponse.output_text ?? "The GM pauses, uncertain how to respond.",
+  );
   const firstExtractedScene = extractSceneBlock(firstText);
   const firstExtractedParty = extractPartyBlock(firstExtractedScene.content);
-  const firstExtractedState = extractStateBlock(firstExtractedParty.content);
+  const firstExtractedBootstrap = extractCampaignBootstrapBlock(firstExtractedParty.content);
+  const firstExtractedState = extractStateBlock(firstExtractedBootstrap.content);
+  const firstVisibleContent = getVisibleResponseContent(firstText);
+  const shouldPreferLowLatency = options?.lowLatency === true;
 
   if (
-    firstExtractedParty.found &&
-    firstExtractedState.found &&
-    (firstExtractedState.updates.length > 0 ||
-      !narrationSuggestsTrackedStateChange(firstExtractedState.content))
+    hasAcceptableStructuredReply(firstExtractedParty, firstExtractedState) ||
+    (shouldPreferLowLatency && firstVisibleContent.length > 0)
   ) {
     return {
       text: firstText,
       extractedScene: firstExtractedScene,
       extractedParty: firstExtractedParty,
+      extractedBootstrap: firstExtractedBootstrap,
       extractedState: firstExtractedState,
+      trace: {
+        requestMs: Date.now() - requestStart,
+        firstModelMs,
+        retryModelMs: 0,
+        stateRepairMs: 0,
+        usedRetry: false,
+        lowLatencyAccepted: shouldPreferLowLatency,
+      },
     };
   }
 
+  const retryCallStart = Date.now();
   const retryResponse = await openai.responses.create({
     model: chatModel,
     input: [
@@ -658,31 +707,41 @@ async function requestStructuredGmResponse(input: Array<{
       },
     ],
   });
-  const retryText =
-    retryResponse.output_text ?? "The GM pauses, uncertain how to respond.";
+  const retryModelMs = Date.now() - retryCallStart;
+  const retryText = canonicalizeStructuredMarkers(
+    retryResponse.output_text ?? "The GM pauses, uncertain how to respond.",
+  );
   const retryExtractedScene = extractSceneBlock(retryText);
   const retryExtractedParty = extractPartyBlock(retryExtractedScene.content);
-  const retryExtractedState = extractStateBlock(retryExtractedParty.content);
+  const retryExtractedBootstrap = extractCampaignBootstrapBlock(retryExtractedParty.content);
+  const retryExtractedState = extractStateBlock(retryExtractedBootstrap.content);
+  const retryVisibleContent = getVisibleResponseContent(retryText);
 
-  if (
-    retryExtractedParty.found &&
-    retryExtractedState.found &&
-    (retryExtractedState.updates.length > 0 ||
-      !narrationSuggestsTrackedStateChange(retryExtractedState.content))
-  ) {
+  if (hasAcceptableStructuredReply(retryExtractedParty, retryExtractedState)) {
     return {
       text: retryText,
       extractedScene: retryExtractedScene,
       extractedParty: retryExtractedParty,
+      extractedBootstrap: retryExtractedBootstrap,
       extractedState: retryExtractedState,
+      trace: {
+        requestMs: Date.now() - requestStart,
+        firstModelMs,
+        retryModelMs,
+        stateRepairMs: 0,
+        usedRetry: true,
+        lowLatencyAccepted: false,
+      },
     };
   }
 
+  const stateRepairStart = Date.now();
   const repairedState = await extractStructuredStateFromNarration(
     retryExtractedState.content,
     characterSummary,
     chatModel,
   );
+  const stateRepairMs = Date.now() - stateRepairStart;
   const deterministicFallback =
     repairedState.updates.length > 0
       ? repairedState
@@ -696,11 +755,39 @@ async function requestStructuredGmResponse(input: Array<{
         };
 
   return {
-    text: retryText,
+    text:
+      retryVisibleContent || firstVisibleContent || "The situation advances. What do you do next?",
     extractedScene: retryExtractedScene,
     extractedParty: retryExtractedParty,
+    extractedBootstrap: retryExtractedBootstrap,
     extractedState: deterministicFallback,
+    trace: {
+      requestMs: Date.now() - requestStart,
+      firstModelMs,
+      retryModelMs,
+      stateRepairMs,
+      usedRetry: true,
+      lowLatencyAccepted: false,
+    },
   };
+}
+
+function sanitizeVisibleGmContent(text: string) {
+  const normalized = text.replace(/\r\n/g, "\n");
+  return normalized
+    .replace(/[*_`>\-\s]*PARTY:\s*[\s\S]*?[*_`>\-\s]*ENDPARTY/gi, "\n")
+    .replace(/[*_`>\-\s]*COMBAT:\s*[\s\S]*?[*_`>\-\s]*ENDCOMBAT/gi, "\n")
+    .replace(/[*_`>\-\s]*BOOTSTRAP:\s*[\s\S]*?[*_`>\-\s]*ENDBOOTSTRAP/gi, "\n")
+    .replace(/[*_`>\-\s]*STATE:\s*[\s\S]*?[*_`>\-\s]*ENDSTATE/gi, "\n")
+    .replace(/^\s*SCENE:\s*/im, "")
+    .replace(
+      /^\s*(?:Title|Place|Mood|Threat|Goal|Clock|Context):\s*[^\n]*\n?/gim,
+      "",
+    )
+    .replace(/(?:^|\n)\s*END[ A-Z]*SCEN[ A-Z]*\s*(?=\n|$)/gi, "\n")
+    .replace(/(?:^|\n)\s*ENDS?CEN?E?\s*(?=\n|$)/gi, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
 }
 
 function mergeSheetData(currentValue: unknown, patchValue: unknown): unknown {
@@ -741,58 +828,278 @@ function formatValue(value: unknown): string {
   return String(value);
 }
 
-function formatCharacterSheet(sheetJson: unknown) {
-  if (!sheetJson || typeof sheetJson !== "object" || Array.isArray(sheetJson)) {
-    return "No saved sheet data.";
-  }
+type PromptCharacterDetailFlags = {
+  includeSpellcasting: boolean;
+  includeEquipment: boolean;
+  includeSkills: boolean;
+  includeResources: boolean;
+};
 
-  const typedSheet = sheetJson as Record<string, unknown>;
-  const promptSheet = {
-    ...typedSheet,
-    behaviorSummary:
-      typeof typedSheet.behaviorSummary === "string" && typedSheet.behaviorSummary.trim()
-        ? typedSheet.behaviorSummary.trim()
-        : deriveBehaviorSummary(typedSheet),
-  };
-  const visibleEntries = Object.entries(promptSheet).filter(
-    ([key]) => !PROMPT_HIDDEN_SHEET_KEYS.has(key),
-  );
+function derivePromptCharacterDetailFlags(params: {
+  promptMessage: string;
+  gmContext: string;
+  combatActive: boolean;
+  ruleset: string;
+}) {
+  const sourceText = `${params.promptMessage}\n${params.gmContext}`.toLowerCase();
+  const isDeadlands = params.ruleset.trim().toLowerCase() === "deadlands classic";
+  const includeSpellcasting =
+    /\b(spell|cast|magic|cantrip|slot|hex|miracle|arcane|bless|sorcer|wizard|cleric|huckster|shaman|blessed)\b/i.test(
+      sourceText,
+    );
+  const includeEquipment =
+    params.combatActive ||
+    /\b(weapon|armor|equip|equipment|item|inventory|draw|reload|ammo|shield|rifle|revolver|pistol|sword|bow|shotgun)\b/i.test(
+      sourceText,
+    );
+  const includeSkills =
+    /\b(check|roll|skill|stealth|persuasion|investigation|perception|faith|guts|shootin|hexslingin)\b/i.test(
+      sourceText,
+    );
+  const includeResources =
+    params.combatActive ||
+    isDeadlands ||
+    /\b(hp|wind|wound|fate|chip|heal|damage|hurt|injur|status|condition|buff|debuff)\b/i.test(
+      sourceText,
+    );
 
-  if (visibleEntries.length === 0) {
-    return "No saved sheet data.";
-  }
-
-  return visibleEntries
-    .map(([key, value]) => `${key}: ${formatValue(value)}`)
-    .join("\n");
+  return {
+    includeSpellcasting,
+    includeEquipment,
+    includeSkills,
+    includeResources,
+  } satisfies PromptCharacterDetailFlags;
 }
 
-function buildCharacterSummary(campaign: {
-  characters: Array<{
-    name: string;
-    role: string;
-    isMainCharacter: boolean;
-    memorySummary: string | null;
-    sheetJson: unknown;
-  }>;
+function normalizeNameForLookup(value: string) {
+  return value.trim().toLowerCase();
+}
+
+function getRelevantCharacterSet(params: {
+  campaign: {
+    characters: Array<{
+      id: string;
+      name: string;
+      role: string;
+      isMainCharacter: boolean;
+      memorySummary: string | null;
+      sheetJson: unknown;
+    }>;
+  };
+  promptMessage: string;
+  gmContext: string;
+  combatState: CombatState;
 }) {
-  if (campaign.characters.length === 0) {
+  const mainCharacter =
+    params.campaign.characters.find((character) => character.isMainCharacter) ?? null;
+  const selected = new Map<string, (typeof params.campaign.characters)[number]>();
+  if (mainCharacter) {
+    selected.set(mainCharacter.id, mainCharacter);
+  }
+
+  const textForNameMatch = `${params.promptMessage}\n${params.gmContext}`.toLowerCase();
+  const normalizedByName = new Map(
+    params.campaign.characters.map((character) => [
+      normalizeNameForLookup(character.name),
+      character,
+    ]),
+  );
+
+  for (const character of params.campaign.characters) {
+    if (character.isMainCharacter) {
+      continue;
+    }
+    const escapedName = character.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (new RegExp(`\\b${escapedName}\\b`, "i").test(textForNameMatch)) {
+      selected.set(character.id, character);
+    }
+  }
+
+  if (params.combatState.combatActive) {
+    for (const rosterEntry of params.combatState.roster) {
+      if (rosterEntry.type !== "character") {
+        continue;
+      }
+      const matched =
+        (typeof rosterEntry.id === "string"
+          ? params.campaign.characters.find((character) => character.id === rosterEntry.id)
+          : null) ??
+        normalizedByName.get(normalizeNameForLookup(rosterEntry.name));
+      if (matched) {
+        selected.set(matched.id, matched);
+      }
+    }
+  }
+
+  return Array.from(selected.values());
+}
+
+function buildAdaptiveCharacterSummary(params: {
+  campaign: {
+    characters: Array<{
+      id: string;
+      name: string;
+      role: string;
+      isMainCharacter: boolean;
+      memorySummary: string | null;
+      sheetJson: unknown;
+    }>;
+  };
+  promptMessage: string;
+  gmContext: string;
+  combatState: CombatState;
+  ruleset: string;
+}) {
+  const relevantCharacters = getRelevantCharacterSet({
+    campaign: params.campaign,
+    promptMessage: params.promptMessage,
+    gmContext: params.gmContext,
+    combatState: params.combatState,
+  });
+  if (relevantCharacters.length === 0) {
     return "No characters are defined.";
   }
 
-  return campaign.characters
+  const flags = derivePromptCharacterDetailFlags({
+    promptMessage: params.promptMessage,
+    gmContext: params.gmContext,
+    combatActive: params.combatState.combatActive,
+    ruleset: params.ruleset,
+  });
+  const isDeadlands = params.ruleset.trim().toLowerCase() === "deadlands classic";
+
+  return relevantCharacters
     .map((character) => {
-        const lines = [
-          `${character.isMainCharacter ? "Main Character" : "Party Character"}: ${character.name}`,
+      const sheet =
+        character.sheetJson &&
+        typeof character.sheetJson === "object" &&
+        !Array.isArray(character.sheetJson)
+          ? (character.sheetJson as Record<string, unknown>)
+          : {};
+      const className =
+        typeof sheet.class === "string" && sheet.class.trim() ? sheet.class.trim() : "";
+      const level =
+        typeof sheet.level === "number"
+          ? sheet.level
+          : typeof sheet.level === "string" && sheet.level.trim()
+            ? Number.parseInt(sheet.level, 10)
+            : null;
+      const ancestry =
+        typeof sheet.ancestry === "string" && sheet.ancestry.trim()
+          ? sheet.ancestry.trim()
+          : typeof sheet.race === "string" && sheet.race.trim()
+            ? sheet.race.trim()
+            : "";
+      const hp =
+        sheet.hp && typeof sheet.hp === "object" && !Array.isArray(sheet.hp)
+          ? (sheet.hp as Record<string, unknown>)
+          : null;
+      const hpCurrent =
+        hp && typeof hp.current === "number"
+          ? hp.current
+          : hp && typeof hp.current === "string" && hp.current.trim()
+            ? Number.parseInt(hp.current, 10)
+            : null;
+      const hpMax =
+        hp && typeof hp.max === "number"
+          ? hp.max
+          : hp && typeof hp.max === "string" && hp.max.trim()
+            ? Number.parseInt(hp.max, 10)
+            : null;
+      const lines = [
+        [
+          character.isMainCharacter ? "Main Character" : "Party Character",
+          character.name,
           `Role: ${character.role}`,
+          className ? `Class: ${className}${level ? ` ${level}` : ""}` : "",
+          ancestry ? `Ancestry: ${ancestry}` : "",
+          hpCurrent !== null || hpMax !== null ? `HP: ${hpCurrent ?? "?"}/${hpMax ?? "?"}` : "",
           `Memory: ${
             character.memorySummary
-              ? truncatePromptText(character.memorySummary, 180)
+              ? truncatePromptText(character.memorySummary, 120)
               : "None"
           }`,
-          "Sheet:",
-          formatCharacterSheet(character.sheetJson),
-        ];
+        ]
+          .filter(Boolean)
+          .join(" | "),
+      ];
+
+      if (flags.includeResources) {
+        const resourceSegments: string[] = [];
+        if (isDeadlands) {
+          if (sheet.wind && typeof sheet.wind === "object" && !Array.isArray(sheet.wind)) {
+            const wind = sheet.wind as Record<string, unknown>;
+            resourceSegments.push(`Wind: ${String(wind.current ?? "?")}/${String(wind.max ?? "?")}`);
+          }
+          if (sheet.wounds && typeof sheet.wounds === "object" && !Array.isArray(sheet.wounds)) {
+            const wounds = sheet.wounds as Record<string, unknown>;
+            resourceSegments.push(`Wounds: ${String(wounds.current ?? "?")}/${String(wounds.max ?? "?")}`);
+          }
+          if (sheet.fateChipShorthand && typeof sheet.fateChipShorthand === "string") {
+            resourceSegments.push(`Fate: ${sheet.fateChipShorthand}`);
+          }
+        }
+        const statusEffects = Array.isArray(sheet.statusEffects)
+          ? (sheet.statusEffects as unknown[]).filter((entry) => typeof entry === "string")
+          : [];
+        if (statusEffects.length > 0) {
+          resourceSegments.push(`Status: ${statusEffects.join(", ")}`);
+        }
+        if (resourceSegments.length > 0) {
+          lines.push(`Resources: ${resourceSegments.join(" | ")}`);
+        }
+      }
+
+      if (flags.includeSpellcasting) {
+        const spellSegments = [
+          typeof sheet.spellcastingAbility === "string" && sheet.spellcastingAbility
+            ? `Ability: ${sheet.spellcastingAbility}`
+            : "",
+          typeof sheet.spellSaveDc === "number"
+            ? `Save DC: ${sheet.spellSaveDc}`
+            : typeof sheet.spellSaveDc === "string" && sheet.spellSaveDc
+              ? `Save DC: ${sheet.spellSaveDc}`
+              : "",
+          typeof sheet.spellAttackBonus === "number"
+            ? `Spell Atk: +${sheet.spellAttackBonus}`
+            : typeof sheet.spellAttackBonus === "string" && sheet.spellAttackBonus
+              ? `Spell Atk: +${sheet.spellAttackBonus}`
+              : "",
+          sheet.spellSlots ? `Slots: ${formatValue(sheet.spellSlots)}` : "",
+          sheet.spells ? `Spells: ${truncatePromptText(formatValue(sheet.spells), 180)}` : "",
+        ].filter(Boolean);
+        if (spellSegments.length > 0) {
+          lines.push(`Spellcasting: ${spellSegments.join(" | ")}`);
+        }
+      }
+
+      if (flags.includeEquipment) {
+        const equipmentSegments = [
+          typeof sheet.mainHand === "string" && sheet.mainHand ? `Main: ${sheet.mainHand}` : "",
+          typeof sheet.offHand === "string" && sheet.offHand ? `Off: ${sheet.offHand}` : "",
+          typeof sheet.rangedWeapon === "string" && sheet.rangedWeapon
+            ? `Ranged: ${sheet.rangedWeapon}`
+            : "",
+          typeof sheet.longarm === "string" && sheet.longarm ? `Longarm: ${sheet.longarm}` : "",
+          sheet.attackProfiles ? `Attacks: ${truncatePromptText(formatValue(sheet.attackProfiles), 120)}` : "",
+          sheet.equipment ? `Gear: ${truncatePromptText(formatValue(sheet.equipment), 160)}` : "",
+        ].filter(Boolean);
+        if (equipmentSegments.length > 0) {
+          lines.push(`Loadout: ${equipmentSegments.join(" | ")}`);
+        }
+      }
+
+      if (flags.includeSkills) {
+        const skillSegments = [
+          sheet.skills ? `Skills: ${truncatePromptText(formatValue(sheet.skills), 140)}` : "",
+          sheet.stats ? `Stats: ${truncatePromptText(formatValue(sheet.stats), 120)}` : "",
+          sheet.traits ? `Traits: ${truncatePromptText(formatValue(sheet.traits), 120)}` : "",
+          typeof sheet.proficiencyBonus === "number" ? `Prof: +${sheet.proficiencyBonus}` : "",
+        ].filter(Boolean);
+        if (skillSegments.length > 0) {
+          lines.push(`Checks: ${skillSegments.join(" | ")}`);
+        }
+      }
 
       return lines.join("\n");
     })
@@ -858,7 +1165,7 @@ function formatCompanionBehaviorContracts(profiles: CompanionBehaviorProfile[]) 
         profile.directives.length > 0
           ? profile.directives.join(" | ")
           : "No explicit directives; follow behaviorSummary closely.";
-      return `${profile.name}: ${directiveText} (summary: ${profile.summary})`;
+      return `${profile.name}: ${directiveText}`;
     })
     .join("\n");
 }
@@ -875,7 +1182,9 @@ function getSceneIdentity(messageContent: string) {
 
 function getVisibleTranscriptContent(content: string) {
   const visibleContent = extractStateBlock(
-    extractCombatBlock(extractPartyBlock(stripSceneBlock(content)).content).content,
+    extractCampaignBootstrapBlock(
+      extractCombatBlock(extractPartyBlock(stripSceneBlock(content)).content).content,
+    ).content,
   ).content;
 
   return visibleContent
@@ -928,11 +1237,12 @@ function buildRecentTranscript(campaign: {
   }
 
   return campaign.messages
-    .slice(sceneStartIndex)
+    .slice(Math.max(sceneStartIndex, campaign.messages.length - 4))
     .map(
       (message) =>
-        `${message.speakerName} (${message.role}): ${getVisibleTranscriptContent(
-          message.content,
+        `${message.speakerName} (${message.role}): ${truncatePromptText(
+          getVisibleTranscriptContent(message.content),
+          320,
         )}`,
     )
     .join("\n");
@@ -953,7 +1263,7 @@ function buildLatestGmContext(campaign: {
     return "No recent GM context.";
   }
 
-  return `GM (gm): ${getVisibleTranscriptContent(latestGmMessage.content)}`;
+  return `GM (gm): ${truncatePromptText(getVisibleTranscriptContent(latestGmMessage.content), 500)}`;
 }
 
 type ParsedResponseMessage = {
@@ -976,7 +1286,7 @@ function extractAttributedCompanionFromBlock(
   );
   const nameColonMatch = trimmedBlock.match(/^([A-Z][A-Za-z' -]{1,48})\s*:\s*/);
   const nameQuoteTailMatch = trimmedBlock.match(
-    /["“][^"”]{3,}["”]\s*,?\s*([A-Z][A-Za-z' -]{1,48})\s*(?:says?|said|repl(?:y|ies|ied)|asks?|asked)\b/i,
+    /["â€œ][^"â€]{3,}["â€]\s*,?\s*([A-Z][A-Za-z' -]{1,48})\s*(?:says?|said|repl(?:y|ies|ied)|asks?|asked)\b/i,
   );
   const requestedName =
     nameLeadMatch?.[1] ?? nameColonMatch?.[1] ?? nameQuoteTailMatch?.[1] ?? "";
@@ -990,7 +1300,7 @@ function extractAttributedCompanionFromBlock(
     return null;
   }
 
-  const quotedMatch = trimmedBlock.match(/["“]([^"”]{3,})["”]/);
+  const quotedMatch = trimmedBlock.match(/["â€œ]([^"â€]{3,})["â€]/);
   const content =
     quotedMatch?.[1]?.trim() ||
     trimmedBlock
@@ -1263,7 +1573,7 @@ function inferStateUpdatesFromNarration(
 
     return (
       /\b(you|your)\b/i.test(text) ||
-      new RegExp(`\\b${escapedMainName}(?:['’]s)?\\b`, "i").test(text)
+      new RegExp(`\\b${escapedMainName}(?:['â€™]s)?\\b`, "i").test(text)
     );
   };
 
@@ -1312,7 +1622,7 @@ function inferStateUpdatesFromNarration(
       const escapedName = character.name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
       const lineMatches = Array.from(
         combinedText.matchAll(
-          new RegExp(`${escapedName}(?:['’]s)?[^\\n]{0,220}`, "gi"),
+          new RegExp(`${escapedName}(?:['â€™]s)?[^\\n]{0,220}`, "gi"),
         ),
       );
 
@@ -1875,81 +2185,375 @@ function normalizeNarratedCombatName(value: string) {
     .trim();
 }
 
+function parseNarratedCombatBoolean(value: string) {
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "true" || normalized === "yes") {
+    return true;
+  }
+  if (normalized === "false" || normalized === "no") {
+    return false;
+  }
+  return null;
+}
+
+function parseNarratedCombatRosterFromBullets(
+  lines: string[],
+  characterNames: string[],
+) {
+  const characterNameSet = new Set(
+    characterNames.map((name) => normalizeNarratedCombatName(name).toLowerCase()),
+  );
+  const rosterStartIndex = lines.findIndex((line) => /\broster\s*:/i.test(line));
+  if (rosterStartIndex < 0) {
+    return [] as Array<{
+      name: string;
+      type: "character" | "enemy" | "npc";
+      initiative: number;
+      active: boolean;
+      summary?: string;
+      hp?: string;
+    }>;
+  }
+
+  const parsed: Array<{
+    name: string;
+    type: "character" | "enemy" | "npc";
+    initiative: number;
+    active: boolean;
+    summary?: string;
+    hp?: string;
+  }> = [];
+
+  for (let index = rosterStartIndex + 1; index < lines.length; index += 1) {
+    const rawLine = lines[index].trim();
+    if (!rawLine) {
+      if (parsed.length > 0) {
+        break;
+      }
+      continue;
+    }
+    if (!/^[\-\*]\s+/.test(rawLine)) {
+      if (parsed.length > 0) {
+        break;
+      }
+      continue;
+    }
+
+    const cleanedLine = rawLine
+      .replace(/^[\-\*]\s+/, "")
+      .replace(/\*\*/g, "")
+      .trim();
+    const headMatch = cleanedLine.match(/^(Character|Enemy|NPC)\s*:\s*([^,]+)(.*)$/i);
+    if (!headMatch) {
+      continue;
+    }
+
+    const rawType = headMatch[1].toLowerCase();
+    const type: "character" | "enemy" | "npc" =
+      rawType === "enemy" || rawType === "npc" ? rawType : "character";
+    const name = normalizeNarratedCombatName(headMatch[2]);
+    if (!name) {
+      continue;
+    }
+
+    const remainder = headMatch[3] ?? "";
+    const segments = remainder
+      .split(",")
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+
+    let initiative = 0;
+    let active = false;
+    let summary: string | undefined;
+    let hp: string | undefined;
+
+    for (const segment of segments) {
+      const keyValueMatch = segment.match(/^([a-z ]+)\s*:\s*(.+)$/i);
+      if (!keyValueMatch) {
+        continue;
+      }
+      const key = keyValueMatch[1].trim().toLowerCase();
+      const value = keyValueMatch[2].trim();
+
+      if (key === "initiative") {
+        const parsedValue = Number(value);
+        if (Number.isFinite(parsedValue)) {
+          initiative = Math.max(1, Math.trunc(parsedValue));
+        }
+        continue;
+      }
+      if (key === "active") {
+        const parsedValue = parseNarratedCombatBoolean(value);
+        if (parsedValue !== null) {
+          active = parsedValue;
+        }
+        continue;
+      }
+      if (key === "summary") {
+        summary = value;
+        const hpInSummaryMatch = value.match(/\bHP\s*:\s*([^,]+)/i);
+        if (hpInSummaryMatch && !hp) {
+          hp = hpInSummaryMatch[1].trim();
+        }
+        continue;
+      }
+      if (key === "hp") {
+        hp = value;
+      }
+    }
+
+    if (initiative <= 0) {
+      initiative = Math.max(1, 20 - parsed.length);
+    }
+
+    parsed.push({
+      name,
+      type: characterNameSet.has(name.toLowerCase()) ? "character" : type,
+      initiative,
+      active,
+      summary,
+      hp,
+    });
+  }
+
+  return parsed;
+}
+
+function parseNarratedCountToken(value: string) {
+  const normalized = value.trim().toLowerCase();
+  const numeric = Number(normalized);
+  if (Number.isFinite(numeric)) {
+    return Math.max(0, Math.trunc(numeric));
+  }
+
+  const wordMap: Record<string, number> = {
+    one: 1,
+    two: 2,
+    three: 3,
+    four: 4,
+    five: 5,
+    six: 6,
+    seven: 7,
+    eight: 8,
+    nine: 9,
+    ten: 10,
+    eleven: 11,
+    twelve: 12,
+  };
+  return wordMap[normalized] ?? 0;
+}
+
+function inferEnemyGroupFromNarration(content: string) {
+  const remainingMatch = content.match(
+    /\bremaining\s+(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+([a-z][a-z0-9' -]{2,30})\b/i,
+  );
+  if (remainingMatch) {
+    const count = parseNarratedCountToken(remainingMatch[1]);
+    const rawLabel = normalizeNarratedCombatName(remainingMatch[2]);
+    if (count > 0 && rawLabel) {
+      return {
+        name: rawLabel.replace(/(?:es|s)$/i, ""),
+        count,
+      };
+    }
+  }
+
+  const countedHostileMatch = content.match(
+    /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+(?:(?:armed|angry|hostile|gang)\s+)?(enforcers?|thugs?|guards?|assassins?|wolves?|bandits?|goblins?|raiders?|patrons?)\b/i,
+  );
+  if (countedHostileMatch) {
+    const count = parseNarratedCountToken(countedHostileMatch[1]);
+    const rawLabel = normalizeNarratedCombatName(countedHostileMatch[2]);
+    if (count > 0 && rawLabel) {
+      return {
+        name: rawLabel.replace(/(?:es|s)$/i, ""),
+        count,
+      };
+    }
+  }
+
+  const genericMatch = content.match(
+    /\b(\d+|one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)\s+([a-z][a-z0-9' -]{2,30})\b/i,
+  );
+  if (genericMatch) {
+    const count = parseNarratedCountToken(genericMatch[1]);
+    const rawLabel = normalizeNarratedCombatName(genericMatch[2]);
+    if (count > 1 && rawLabel) {
+      return {
+        name: rawLabel.replace(/(?:es|s)$/i, ""),
+        count,
+      };
+    }
+  }
+
+  if (/\bgoblin(?:s)?\b/i.test(content)) {
+    return { name: "Goblin", count: 4 };
+  }
+  if (/\bbandit(?:s)?\b/i.test(content)) {
+    return { name: "Bandit", count: 3 };
+  }
+  if (/\braider(?:s)?\b/i.test(content)) {
+    return { name: "Raider", count: 3 };
+  }
+  if (/\benforcer(?:s)?\b/i.test(content) || /\bthug(?:s)?\b/i.test(content)) {
+    return { name: "Thug", count: 2 };
+  }
+  if (/\bgang lieutenant\b/i.test(content)) {
+    return { name: "Gang Hostile", count: 3 };
+  }
+
+  return null;
+}
+
 function inferCombatStartFromNarration(
   content: string,
   characterNames: string[],
 ): Partial<CombatState> | null {
-  if (!/\binitiative\b/i.test(content) && !/\bturn order\b/i.test(content)) {
+  if (
+    !/\binitiative\b/i.test(content) &&
+    !/\bturn order\b/i.test(content) &&
+    !/\bcombat update\b/i.test(content) &&
+    !/\bcombat (?:has )?begun\b/i.test(content)
+  ) {
     return null;
   }
 
   const lines = content.replace(/\r\n/g, "\n").split("\n");
   const orderStartIndex = lines.findIndex((line) =>
-    /\b(?:current\s+)?initiative order\b/i.test(line),
+    /\b(?:(?:current|combat)\s+)?initiative order\b/i.test(line),
   );
-
-  if (orderStartIndex < 0) {
-    return null;
-  }
-
   const names: string[] = [];
 
-  for (let index = orderStartIndex + 1; index < lines.length; index += 1) {
-    const rawLine = lines[index].trim();
-    if (!rawLine) {
-      if (names.length > 0) {
+  if (orderStartIndex >= 0) {
+    for (let index = orderStartIndex + 1; index < lines.length; index += 1) {
+      const rawLine = lines[index].trim();
+      if (!rawLine) {
+        if (names.length > 0) {
+          break;
+        }
+        continue;
+      }
+      if (
+        /\bcurrent situation\b/i.test(rawLine) ||
+        /\bwhat do you choose\b/i.test(rawLine) ||
+        /\byour options\b/i.test(rawLine)
+      ) {
         break;
       }
-      continue;
-    }
-    if (/^\d+\.\s+/.test(rawLine)) {
-      break;
-    }
-    if (/\bit(?:'|’)?s your turn\b/i.test(rawLine)) {
-      break;
-    }
+      if (/^\d+\.\s+/.test(rawLine)) {
+        break;
+      }
+      if (/\bit(?:'|â€™)?s your turn\b/i.test(rawLine)) {
+        break;
+      }
 
-    const normalizedName = normalizeNarratedCombatName(
-      rawLine.replace(/^\d+\s*[\)\.\-:]\s*/, ""),
-    );
-    if (!normalizedName) {
-      continue;
-    }
-
-    if (!names.some((name) => name.toLowerCase() === normalizedName.toLowerCase())) {
-      names.push(normalizedName);
+      const cleanedLine = rawLine
+        .replace(/^[*\- \s]+/, "")
+        .replace(/[*\s]+$/, "")
+        .trim();
+      const normalizedName = normalizeNarratedCombatName(
+        cleanedLine.replace(/^\d+\s*[\)\.\-:]\s*/, ""),
+      );
+      if (!normalizedName) {
+        continue;
+      }
+      if (!names.some((name) => name.toLowerCase() === normalizedName.toLowerCase())) {
+        names.push(normalizedName);
+      }
     }
   }
 
   if (names.length < 2) {
-    return null;
+    const currentInitiativeLine = lines.find((line) => /\bcurrent initiative\s*:/i.test(line));
+    if (currentInitiativeLine) {
+      const listMatch = currentInitiativeLine.match(/\bcurrent initiative\s*:\s*(.+)$/i);
+      const entries = (listMatch?.[1] ?? "")
+        .split(",")
+        .map((entry) => normalizeNarratedCombatName(entry))
+        .filter(Boolean);
+      for (const entry of entries) {
+        if (!names.some((name) => name.toLowerCase() === entry.toLowerCase())) {
+          names.push(entry);
+        }
+      }
+    }
   }
 
   const characterNameSet = new Set(
     characterNames.map((name) => normalizeNarratedCombatName(name).toLowerCase()),
   );
-  const activeTurnMatch = content.match(/([^,\n]{1,80}),\s*it(?:'|’)?s your turn/i);
+  const parsedRoster = parseNarratedCombatRosterFromBullets(lines, characterNames);
+  const rosterFromNames = names.map((name, index) => ({
+    name,
+    type: characterNameSet.has(name.toLowerCase()) ? ("character" as const) : ("enemy" as const),
+    initiative: Math.max(1, names.length - index),
+    active: false,
+  }));
+  const roster = parsedRoster.length >= 2 ? parsedRoster : rosterFromNames;
+
+  if (roster.length < 2) {
+    const fallbackCharacters = characterNames
+      .map((name) => normalizeNarratedCombatName(name))
+      .filter(Boolean)
+      .slice(0, 6);
+    const inferredEnemyGroup = inferEnemyGroupFromNarration(content);
+    if (fallbackCharacters.length === 0 || !inferredEnemyGroup) {
+      return null;
+    }
+
+    const fallbackRoster = [
+      ...fallbackCharacters.map((name, index) => ({
+        name,
+        type: "character" as const,
+        initiative: Math.max(1, 20 - index),
+        active: index === 0,
+      })),
+      ...Array.from({ length: Math.min(12, inferredEnemyGroup.count) }).map((_, index) => ({
+        name: `${inferredEnemyGroup.name} ${index + 1}`,
+        type: "enemy" as const,
+        initiative: Math.max(1, 10 - index),
+        active: false,
+        summary: `Inferred from narration (${inferredEnemyGroup.count} total)`,
+      })),
+    ];
+
+    return {
+      combatActive: true,
+      round: 1,
+      turnIndex: 0,
+      roster: fallbackRoster,
+    };
+  }
+
+  const turnIndexMatch = content.match(/\bturn index\s*:\s*(\d+)\b/i);
+  const indexedTurn =
+    turnIndexMatch && Number.isFinite(Number(turnIndexMatch[1]))
+      ? Math.max(0, Math.trunc(Number(turnIndexMatch[1])))
+      : null;
+  const explicitActiveIndex = roster.findIndex((entry) => entry.active);
+  const activeTurnMatch = content.match(
+    /([^,\n]{1,80}),\s*(?:it(?:'|â€™)?s your turn|you have the first move|you act first)/i,
+  );
   const activeTurnName = activeTurnMatch
     ? normalizeNarratedCombatName(activeTurnMatch[1]).toLowerCase()
     : "";
 
-  const roster = names.map((name, index) => ({
-    name,
-    type: characterNameSet.has(name.toLowerCase()) ? "character" : "enemy",
-    initiative: Math.max(1, names.length - index),
-    active: false,
-  }));
-
   const activeIndex =
-    activeTurnName.length > 0
-      ? Math.max(
-          0,
-          roster.findIndex((entry) => entry.name.toLowerCase() === activeTurnName),
-        )
-      : 0;
+    explicitActiveIndex >= 0
+      ? explicitActiveIndex
+      : indexedTurn !== null && indexedTurn < roster.length
+        ? indexedTurn
+        : activeTurnName.length > 0
+          ? Math.max(
+              0,
+              roster.findIndex((entry) => entry.name.toLowerCase() === activeTurnName),
+            )
+          : 0;
 
   if (roster[activeIndex]) {
-    roster[activeIndex].active = true;
+    roster.forEach((entry, index) => {
+      entry.active = index === activeIndex;
+    });
   }
 
   return {
@@ -1958,6 +2562,201 @@ function inferCombatStartFromNarration(
     turnIndex: activeIndex,
     roster,
   };
+}
+
+type CombatTriggerDecision = {
+  decision: "NO_COMBAT" | "TENSION_ESCALATION" | "START_COMBAT";
+  score: number;
+  threshold: number;
+  reasons: string[];
+};
+
+function evaluateCombatTriggerDecision(params: {
+  inferredCombatStart: Partial<CombatState> | null;
+  narrationText: string;
+  playerPrompt: string;
+  scene: SceneSummary;
+  bootstrap: ReturnType<typeof normalizeCampaignBootstrap>;
+  explicitOptionSelection: boolean;
+}) {
+  if (!params.inferredCombatStart) {
+    return {
+      decision: "NO_COMBAT",
+      score: 0,
+      threshold: 999,
+      reasons: ["No inferred combat start state present."],
+    } satisfies CombatTriggerDecision;
+  }
+
+  const lowerNarration = params.narrationText.toLowerCase();
+  const lowerPrompt = params.playerPrompt.toLowerCase();
+  const lowerSceneThreat = params.scene.threat.toLowerCase();
+  const lowerSceneContext = params.scene.context.toLowerCase();
+  const lowerSceneGoal = params.scene.goal.toLowerCase();
+  const reasons: string[] = [];
+  let score = 0;
+  let hardStart = false;
+
+  const directCombatStartIntent =
+    /\b(attack|draw steel|draw guns?|join the fight|start(?:ing)? combat|open fire|charge|shoot|strike|stab|slash|engage)\b/.test(
+      lowerPrompt,
+    );
+  const explicitStartLanguage =
+    /\b(combat has begun|combat is now active|initiative order|roll initiative|you are first to act|turn order)\b/.test(
+      lowerNarration,
+    ) || directCombatStartIntent;
+  if (explicitStartLanguage) {
+    hardStart = true;
+    reasons.push("Explicit combat start marker detected.");
+  }
+
+  if (
+    /\b(attack|shoot|fire|strike|stab|slash|charge|join the fight|start combat|gunfight|draw guns?|open fire|kill|finish them)\b/.test(
+      lowerPrompt,
+    )
+  ) {
+    score += 4;
+    reasons.push("Player prompt contains direct hostile action intent.");
+  }
+  if (params.explicitOptionSelection) {
+    score += 1;
+    reasons.push("Explicit numbered option selection committed this turn.");
+  }
+  if (/\b(threat|danger|hostile|ambush|surrounded|wolves|bandit|goblin|assassin)\b/.test(lowerSceneThreat)) {
+    score += 2;
+    reasons.push("Scene threat contains hostile indicators.");
+  }
+  if (/\b(hostile|armed|enemy|bandit|goblin|ambush|raid|siege)\b/.test(lowerSceneContext)) {
+    score += 1;
+    reasons.push("Scene context contains hostile actors.");
+  }
+  if (/\b(fight|defend|survive|escape|hold the line|break through)\b/.test(lowerSceneGoal)) {
+    score += 1;
+    reasons.push("Scene goal implies active conflict.");
+  }
+  if (/\b(surrender|retreat|withdraw|de-?escalat|negotiat|parley|avoid bloodshed|talk)\b/.test(lowerPrompt)) {
+    score -= 2;
+    reasons.push("Player prompt indicates de-escalation preference.");
+  }
+  if (/\b(ceasefire|tense standoff|hold fire|no one attacks)\b/.test(lowerNarration)) {
+    score -= 2;
+    reasons.push("Narration indicates temporary pause/de-escalation.");
+  }
+
+  const pressureRatio = params.bootstrap.clocks
+    .filter((clock) => clock.visibility !== "gm_hidden")
+    .reduce((maxRatio, clock) => {
+      const ratio = clock.max > 0 ? clock.current / clock.max : 0;
+      return Math.max(maxRatio, ratio);
+    }, 0);
+  if (pressureRatio >= 0.75) {
+    score += 1;
+    reasons.push("Visible pressure clock is near completion.");
+  }
+  if (pressureRatio >= 0.9) {
+    score += 1;
+    reasons.push("Visible pressure clock is critical.");
+  }
+
+  const difficultyMode = params.bootstrap.combat_generation?.difficultyMode ?? "standard";
+  const variance = params.bootstrap.combat_generation?.encounterVariance ?? "medium";
+  let threshold = difficultyMode === "cinematic" ? 6 : difficultyMode === "deadly" ? 8 : 7;
+  if (variance === "high") {
+    threshold -= 1;
+    reasons.push("High encounter variance lowers trigger threshold.");
+  } else if (variance === "low") {
+    threshold += 1;
+    reasons.push("Low encounter variance raises trigger threshold.");
+  }
+  threshold = Math.max(4, threshold);
+
+  if (hardStart) {
+    return {
+      decision: "START_COMBAT",
+      score: Math.max(score, threshold),
+      threshold,
+      reasons,
+    } satisfies CombatTriggerDecision;
+  }
+
+  if (score >= threshold) {
+    return {
+      decision: "START_COMBAT",
+      score,
+      threshold,
+      reasons,
+    } satisfies CombatTriggerDecision;
+  }
+  if (score >= threshold - 2) {
+    return {
+      decision: "TENSION_ESCALATION",
+      score,
+      threshold,
+      reasons: [...reasons, "Below auto-start threshold; maintain escalation without initiating combat."],
+    } satisfies CombatTriggerDecision;
+  }
+  return {
+    decision: "NO_COMBAT",
+    score,
+    threshold,
+    reasons: [...reasons, "Insufficient trigger score for auto combat start."],
+  } satisfies CombatTriggerDecision;
+}
+
+function hasDirectCombatStartIntent(prompt: string) {
+  return /\b(attack|draw steel|draw guns?|join the fight|start(?:ing)? combat|open fire|charge|shoot|strike|stab|slash|engage)\b/i.test(
+    prompt,
+  );
+}
+
+function buildPromptForcedCombatStart(
+  content: string,
+  characterNames: string[],
+): Partial<CombatState> | null {
+  const fallbackCharacters = characterNames
+    .map((name) => normalizeNarratedCombatName(name))
+    .filter(Boolean)
+    .slice(0, 6);
+  const inferredEnemyGroup = inferEnemyGroupFromNarration(content);
+  if (fallbackCharacters.length === 0 || !inferredEnemyGroup) {
+    return null;
+  }
+
+  const fallbackRoster = [
+    ...fallbackCharacters.map((name, index) => ({
+      name,
+      type: "character" as const,
+      initiative: Math.max(1, 20 - index),
+      active: index === 0,
+    })),
+    ...Array.from({ length: Math.min(12, inferredEnemyGroup.count) }).map((_, index) => ({
+      name: `${inferredEnemyGroup.name} ${index + 1}`,
+      type: "enemy" as const,
+      initiative: Math.max(1, 10 - index),
+      active: false,
+      summary: `Prompt-forced start (${inferredEnemyGroup.count} inferred)`,
+    })),
+  ];
+
+  return {
+    combatActive: true,
+    round: 1,
+    turnIndex: 0,
+    roster: fallbackRoster,
+  };
+}
+
+function buildCombatShadowSeedInput(params: {
+  campaignId: string;
+  messageCount: number;
+  narrationText: string;
+}) {
+  const compactNarration = params.narrationText
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 200);
+
+  return `${params.campaignId}|${params.messageCount}|${compactNarration}`;
 }
 
 function shouldAutoRefreshRecap(update: PartyUpdateInstruction) {
@@ -2022,19 +2821,24 @@ function inferMajorQuestFromScene(
   return rawGoal;
 }
 
+
 export async function POST(req: NextRequest) {
   const debugStateLoggingEnabled =
     req.headers.get("x-debug-state-logging") === "true";
+  const postRequestStart = Date.now();
+  const phaseTimings: Record<string, number | string | boolean> = {};
   const {
     campaignId,
     message,
     selectedOptionNumbers,
+    engineCombatModeEnabled,
   } = await req.json();
   const parsedPlayerInput = parsePlayerInput(message);
   const explicitOptionSelection =
     Array.isArray(selectedOptionNumbers) &&
     selectedOptionNumbers.some((value) => typeof value === "number");
 
+  const campaignLookupStart = Date.now();
   const campaign = await prisma.campaign.findUnique({
     where: { id: campaignId },
     include: {
@@ -2042,6 +2846,7 @@ export async function POST(req: NextRequest) {
       messages: { orderBy: { createdAt: "desc" }, take: 20 },
     },
   });
+  phaseTimings.campaignLookupMs = Date.now() - campaignLookupStart;
 
   if (!campaign) {
     return NextResponse.json({ error: "Campaign not found" }, { status: 404 });
@@ -2053,23 +2858,45 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Message is required." }, { status: 400 });
   }
 
-    const characterSummary = buildCharacterSummary(campaign);
-    const partySummary = formatPartyStateForPrompt(
+    const shouldUseCompactPrompt = true;
+    const normalizedPartyState = normalizePartyState(
       (campaign as { partyStateJson?: unknown }).partyStateJson,
     );
-  const combatSummary = formatCombatStateForPrompt(
+    const partySummary = shouldUseCompactPrompt
+      ? [
+          `Party name: ${normalizedPartyState.partyName || "None"}`,
+          `Active quests: ${normalizedPartyState.activeQuests.join(" | ") || "None"}`,
+          `Shared inventory: ${normalizedPartyState.sharedInventory.join(" | ") || "None"}`,
+          `Recap: ${truncatePromptText(normalizedPartyState.recap || "None", 180)}`,
+        ].join("\n")
+      : formatPartyStateForPrompt(
+          (campaign as { partyStateJson?: unknown }).partyStateJson,
+        );
+  const combatStateForPrompt = normalizeCombatState(
     (campaign as { combatStateJson?: unknown }).combatStateJson,
   );
+  const combatSummary = shouldUseCompactPrompt
+    ? combatStateForPrompt.combatActive
+      ? `Combat active: round ${combatStateForPrompt.round}, turn ${combatStateForPrompt.turnIndex}, roster ${combatStateForPrompt.roster.length}`
+      : "No active combat."
+    : formatCombatStateForPrompt(
+        (campaign as { combatStateJson?: unknown }).combatStateJson,
+      );
   const chatModel = normalizeCampaignChatModel(
     (campaign as { chatModel?: unknown }).chatModel,
   );
-  const narrationLevel = normalizePartyState(
-    (campaign as { partyStateJson?: unknown }).partyStateJson,
-  ).narrationLevel;
+  const narrationLevel = normalizedPartyState.narrationLevel;
   const normalizedRuleset = campaign.ruleset.trim().toLowerCase();
   const isDeadlandsRuleset = normalizedRuleset === "deadlands classic";
   const recentTranscript = buildRecentTranscript(campaign);
   const latestGmContext = buildLatestGmContext(campaign);
+  const characterSummary = buildAdaptiveCharacterSummary({
+    campaign,
+    promptMessage: parsedPlayerInput.promptMessage,
+    gmContext: latestGmContext,
+    combatState: combatStateForPrompt,
+    ruleset: campaign.ruleset,
+  });
   const mainCharacterName =
     campaign.characters.find((character) => character.isMainCharacter)?.name ??
     "Player";
@@ -2080,6 +2907,38 @@ export async function POST(req: NextRequest) {
   const companionBehaviorContracts = formatCompanionBehaviorContracts(
     companionBehaviorProfiles,
   );
+  const fallbackBootstrap = buildInitialCampaignBootstrap({
+    title: campaign.title,
+    ruleset: campaign.ruleset,
+    startingScenario: campaign.messages[0]?.content ?? "",
+  });
+  const currentBootstrap = normalizeCampaignBootstrap(
+    (campaign as { bootstrapJson?: unknown }).bootstrapJson,
+    fallbackBootstrap,
+  );
+  const bootstrapSummary = shouldUseCompactPrompt
+    ? [
+        `Objective: ${currentBootstrap.campaign.party_goal_public || "None"}`,
+        `Scene: ${currentBootstrap.campaign.starting_scene || "Unknown"}`,
+        `Visible quests: ${
+          currentBootstrap.quests
+            .filter((quest) => quest.visibility === "player" || quest.visibility === "teased")
+            .map((quest) => `${quest.id}:${quest.title}(${quest.status})`)
+            .join(" | ") || "None"
+        }`,
+        `Visible clocks: ${
+          currentBootstrap.clocks
+            .filter((clock) => clock.visibility !== "gm_hidden")
+            .map((clock) => `${clock.name} ${clock.current}/${clock.max}`)
+            .join(" | ") || "None"
+        }`,
+      ].join("\n")
+    : formatCampaignBootstrapForPrompt(currentBootstrap);
+  const combatStateBeforeTurn = normalizeCombatState(
+    (campaign as { combatStateJson?: unknown }).combatStateJson,
+  );
+  const shouldBlockPreEngineRollNarration =
+    engineCombatModeEnabled === true && !combatStateBeforeTurn.combatActive;
 
   const modelInput: Array<{ role: "system" | "user"; content: string }> = [
     {
@@ -2096,11 +2955,21 @@ export async function POST(req: NextRequest) {
         "When a companion speaks or acts, align with their contract even if it is less optimal tactically.",
         `Companion behavior contracts:\n${companionBehaviorContracts}`,
         "When the player attempts something, consider what their sheet supports before narrating outcomes.",
-        "You make every roll on behalf of the player and the world; never ask the player to roll dice.",
-        "When a roll matters, state it explicitly using the word Roll and include the exact numeric result.",
-        "Always show the dice expression and the total, such as `Roll: Athletics check d20(14) + 5 = 19`.",
-        "For contested checks, opposed checks, attacks, saves, or damage, show both sides' exact numbers when relevant.",
-        "Do not say a roll was good, bad, enough, or not enough without also giving the actual rolled values and totals.",
+        shouldBlockPreEngineRollNarration
+          ? "Engine combat pre-start mode: do not resolve or narrate combat dice rolls yet."
+          : "You make every roll on behalf of the player and the world; never ask the player to roll dice.",
+        shouldBlockPreEngineRollNarration
+          ? "Before combat is started in COMBAT, avoid initiative, attack, damage, and save roll lines."
+          : "When a roll matters, state it explicitly using the word Roll and include the exact numeric result.",
+        shouldBlockPreEngineRollNarration
+          ? "Pre-start responses should set up scene tension and list options without numeric combat resolution."
+          : "Always show the dice expression and the total, such as `Roll: Athletics check d20(14) + 5 = 19`.",
+        shouldBlockPreEngineRollNarration
+          ? "Do not resolve contested checks, attacks, or damage until combat is active in COMBAT."
+          : "For contested checks, opposed checks, attacks, saves, or damage, show both sides' exact numbers when relevant.",
+        shouldBlockPreEngineRollNarration
+          ? "Do not include rolled values before combat start."
+          : "Do not say a roll was good, bad, enough, or not enough without also giving the actual rolled values and totals.",
         "When immediate risk appears, use the word Danger.",
         "Use Heals only for literal recovery: restored hp, reduced wounds, eased poison, recovered sanity, or another tracked health-like resource improving.",
         "Never use Heals metaphorically for morale, tension, positioning, crowd reaction, or any non-literal benefit.",
@@ -2153,6 +3022,23 @@ export async function POST(req: NextRequest) {
         "When combat ends, you must explicitly return {\"combatActive\":false,\"round\":1,\"turnIndex\":0,\"roster\":[]} inside the COMBAT block.",
         "Do not leave stale combatants in the roster once the fight, chase, or initiative sequence has ended.",
         "For non-party combatants, type should be enemy or npc and you may omit id.",
+        shouldBlockPreEngineRollNarration
+          ? "Engine combat mode is enabled and combat is not yet active. Do not narrate initiative rolls, attack rolls, damage rolls, saves, or any numeric combat resolution before combat is started in the COMBAT block."
+          : "When a roll matters, state it explicitly using the word Roll and include the exact numeric result.",
+        shouldBlockPreEngineRollNarration
+          ? "In this mode, provide only combat setup and participants in COMBAT, then stop before resolving combat mechanics."
+          : "Always show the dice expression and the total, such as `Roll: Athletics check d20(14) + 5 = 19`.",
+        formatCombatBoundaryForPrompt(),
+        "After the combat block, include a hidden bootstrap-update block using this exact format:",
+        "BOOTSTRAP:",
+        '{"scene_title":"<short current scene title>","objective":"<current objective>","clocks_advanced":[{"id":"CLK1","delta":1}],"quest_updates":[{"id":"Q1","status":"active","addStep":"Interview the witness"}],"clues_revealed":["CL1"],"new_clue":{"id":"CL9","text":"A bloodstained token with a crest","visibility":"gm_hidden"}}',
+        "ENDBOOTSTRAP",
+        "This BOOTSTRAP block is required on every response.",
+        "If no bootstrap state changed this turn, return an empty object in BOOTSTRAP.",
+        "Allowed BOOTSTRAP keys are scene_title, objective, clocks_advanced, quest_updates, clues_revealed, new_clue, and loop_breaker_reason.",
+        "Changing only scene_title and/or objective does not count as structural progression.",
+        "Use clocks_advanced, quest_updates, clues_revealed, or new_clue when meaningful progress occurs.",
+        "Do not include full bootstrap state; include only incremental turn updates.",
         "After the scene block, include a hidden state block using this exact format:",
         "STATE:",
         '[{"name":"Exact Character Name","sheet":{"hp":{"current":9}},"memorySummary":"optional short update"}]',
@@ -2244,6 +3130,9 @@ export async function POST(req: NextRequest) {
         "Combat state:",
         combatSummary,
         "",
+        "Campaign bootstrap state:",
+        bootstrapSummary,
+        "",
         "Characters:",
         characterSummary,
         "",
@@ -2262,35 +3151,120 @@ export async function POST(req: NextRequest) {
       ].join("\n"),
     },
   ];
+  if (debugStateLoggingEnabled) {
+    const systemPromptChars = modelInput[0]?.content?.length ?? 0;
+    const userPromptChars = modelInput[1]?.content?.length ?? 0;
+    const transcriptContext =
+      explicitOptionSelection ? latestGmContext : recentTranscript;
+    phaseTimings.promptSystemChars = systemPromptChars;
+    phaseTimings.promptUserChars = userPromptChars;
+    phaseTimings.promptTotalChars = systemPromptChars + userPromptChars;
+    phaseTimings.promptApproxTokens = Math.ceil(
+      (systemPromptChars + userPromptChars) / 4,
+    );
+    phaseTimings.promptCharacterSummaryChars = characterSummary.length;
+    phaseTimings.promptPartySummaryChars = partySummary.length;
+    phaseTimings.promptCombatSummaryChars = combatSummary.length;
+    phaseTimings.promptBootstrapSummaryChars = bootstrapSummary.length;
+    phaseTimings.promptTranscriptChars = transcriptContext.length;
+    phaseTimings.promptMessageChars = parsedPlayerInput.promptMessage.length;
+  }
 
-  const { text, extractedScene, extractedParty, extractedState } =
+  const structuredResponseStart = Date.now();
+  const { text, extractedScene, extractedParty, extractedBootstrap, extractedState, trace } =
       await requestStructuredGmResponse(
         modelInput,
         characterSummary,
         campaign.characters.map((character) => ({ name: character.name })),
         chatModel,
+        {
+          lowLatency: explicitOptionSelection && !parsedPlayerInput.gmQueryMode,
+        },
       );
-    const visibleResponseContent = extractStateBlock(
-      extractCombatBlock(extractPartyBlock(extractedScene.content).content).content,
+    phaseTimings.structuredResponseMs = Date.now() - structuredResponseStart;
+    if (trace && typeof trace === "object") {
+      Object.assign(phaseTimings, {
+        structuredFirstModelMs:
+          typeof (trace as Record<string, unknown>).firstModelMs === "number"
+            ? ((trace as Record<string, unknown>).firstModelMs as number)
+            : 0,
+        structuredRetryModelMs:
+          typeof (trace as Record<string, unknown>).retryModelMs === "number"
+            ? ((trace as Record<string, unknown>).retryModelMs as number)
+            : 0,
+        structuredStateRepairMs:
+          typeof (trace as Record<string, unknown>).stateRepairMs === "number"
+            ? ((trace as Record<string, unknown>).stateRepairMs as number)
+            : 0,
+        structuredUsedRetry:
+          Boolean((trace as Record<string, unknown>).usedRetry),
+        structuredLowLatencyAccepted:
+          Boolean((trace as Record<string, unknown>).lowLatencyAccepted),
+      });
+    }
+    const parsedVisibleResponseContent = extractStateBlock(
+      extractCampaignBootstrapBlock(
+        extractCombatBlock(extractPartyBlock(extractedScene.content).content).content,
+      ).content,
     ).content;
-    const parsedMessages = await repairCompanionMessagesWithPersonality({
-      messages: parseResponseMessages(visibleResponseContent, companionNames),
-      companionProfiles: companionBehaviorProfiles,
-      chatModel,
-    });
+    const visibleResponseContent = (() => {
+      const parsed = parsedVisibleResponseContent.trim();
+      if (parsed) {
+        return parsed;
+      }
+      if (typeof text === "string" && text.trim()) {
+        const sanitized = sanitizeVisibleGmContent(text);
+        return sanitized || text.trim();
+      }
+      return "The situation advances. What do you do next?";
+    })();
+    const parsedBaseMessages = parseResponseMessages(visibleResponseContent, companionNames);
+    const shouldSkipCompanionRepair =
+      explicitOptionSelection && !parsedPlayerInput.gmQueryMode;
+    const companionRepairStart = Date.now();
+    const parsedMessages = shouldSkipCompanionRepair
+      ? parsedBaseMessages
+      : await repairCompanionMessagesWithPersonality({
+          messages: parsedBaseMessages,
+          companionProfiles: companionBehaviorProfiles,
+          chatModel,
+        });
+    phaseTimings.companionRepairMs = Date.now() - companionRepairStart;
+    phaseTimings.companionRepairSkipped = shouldSkipCompanionRepair;
     const stateUpdates = extractedState.found ? extractedState.updates : [];
     const partyUpdate: PartyUpdateInstruction =
       extractedParty.found ? extractedParty.update : {};
     const extractedCombat = extractCombatBlock(extractedParty.content);
+    const bootstrapUpdate: CampaignBootstrapTurnUpdate =
+      extractedBootstrap.found
+        ? normalizeCampaignBootstrapTurnUpdate(extractedBootstrap.update)
+        : {};
     const combatUpdate =
       extractedCombat.found && extractedCombat.update ? extractedCombat.update : {};
     const hasStructuredCombatUpdate = Object.keys(combatUpdate).length > 0;
+    const hasStructuredCombatStartRequest =
+      hasStructuredCombatUpdate && combatUpdate.combatActive === true;
+    const structuredStartCandidate =
+      !parsedPlayerInput.gmQueryMode &&
+      hasStructuredCombatStartRequest
+        ? combatUpdate
+        : null;
     const previousCombatState = normalizeCombatState(
       (campaign as { combatStateJson?: unknown }).combatStateJson,
     );
-    const inferredCombatStart =
-      !parsedPlayerInput.gmQueryMode && !hasStructuredCombatUpdate
+    const inferredCombatStartRaw =
+      !parsedPlayerInput.gmQueryMode && !hasStructuredCombatStartRequest
         ? inferCombatStartFromNarration(
+            visibleResponseContent,
+            campaign.characters.map((character) => character.name),
+          )
+        : null;
+    const promptForcedCombatStart =
+      !parsedPlayerInput.gmQueryMode &&
+      !hasStructuredCombatStartRequest &&
+      !inferredCombatStartRaw &&
+      hasDirectCombatStartIntent(parsedPlayerInput.promptMessage)
+        ? buildPromptForcedCombatStart(
             visibleResponseContent,
             campaign.characters.map((character) => character.name),
           )
@@ -2318,12 +3292,73 @@ export async function POST(req: NextRequest) {
       console.log("[chat] stateUpdates", JSON.stringify(stateUpdates, null, 2));
       console.log("[chat] partyUpdate", JSON.stringify(partyUpdate, null, 2));
       console.log("[chat] combatUpdate", JSON.stringify(combatUpdate, null, 2));
+      console.log("[chat] bootstrapUpdate", JSON.stringify(bootstrapUpdate, null, 2));
     }
     const safeScene = buildFallbackSceneSummary(campaign);
     const effectiveScene = parsedPlayerInput.gmQueryMode
       ? safeScene
       : (extractedScene.scene ?? safeScene);
-    const effectiveStateUpdates = parsedPlayerInput.gmQueryMode ? [] : stateUpdates;
+    const combatStartCandidate =
+      structuredStartCandidate ?? inferredCombatStartRaw ?? promptForcedCombatStart;
+    const combatStartCandidateSource = structuredStartCandidate
+      ? "structured"
+      : inferredCombatStartRaw
+        ? "inferred"
+        : promptForcedCombatStart
+          ? "prompt-forced"
+        : "none";
+    const combatTriggerDecision =
+      !parsedPlayerInput.gmQueryMode && combatStartCandidate
+        ? evaluateCombatTriggerDecision({
+            inferredCombatStart: combatStartCandidate,
+            narrationText: visibleResponseContent,
+            playerPrompt: parsedPlayerInput.promptMessage,
+            scene: effectiveScene,
+            bootstrap: currentBootstrap,
+            explicitOptionSelection,
+          })
+        : null;
+    if (combatTriggerDecision) {
+      phaseTimings.combatTriggerDecision = combatTriggerDecision.decision;
+      phaseTimings.combatTriggerScore = combatTriggerDecision.score;
+      phaseTimings.combatTriggerThreshold = combatTriggerDecision.threshold;
+      phaseTimings.combatTriggerReasonCount = combatTriggerDecision.reasons.length;
+      phaseTimings.combatTriggerSource = combatStartCandidateSource;
+    }
+    const approvedCombatStart =
+      combatTriggerDecision?.decision === "START_COMBAT" ? combatStartCandidate : null;
+    const inferredCombatStart =
+      combatStartCandidateSource === "inferred" ? approvedCombatStart : null;
+    const combatStartShadow =
+      approvedCombatStart &&
+      Array.isArray(approvedCombatStart.roster) &&
+      approvedCombatStart.roster.length > 0
+        ? buildInitiativeState({
+            seeds: approvedCombatStart.roster.map((entry) => ({
+              id: typeof entry.id === "string" ? entry.id : undefined,
+              name: entry.name,
+              type: entry.type,
+              summary: entry.summary,
+              hp: entry.hp,
+              statusEffects: entry.statusEffects,
+            })),
+            activeName:
+              approvedCombatStart.roster.find((entry) => entry.active)?.name ?? undefined,
+            round:
+              typeof approvedCombatStart.round === "number"
+                ? approvedCombatStart.round
+                : 1,
+            seedInput: buildCombatShadowSeedInput({
+              campaignId,
+              messageCount: campaign.messages.length,
+              narrationText: visibleResponseContent,
+            }),
+          })
+        : null;
+    const effectiveStateUpdates =
+      parsedPlayerInput.gmQueryMode || engineCombatModeEnabled === true
+        ? []
+        : stateUpdates;
     const basePartyUpdate: PartyUpdateInstruction = parsedPlayerInput.gmQueryMode
       ? {}
       : partyUpdate;
@@ -2364,13 +3399,41 @@ export async function POST(req: NextRequest) {
             turnIndex: 0,
             roster: [],
           }
-        : inferredCombatStart
-          ? inferredCombatStart
+        : approvedCombatStart
+          ? structuredStartCandidate
+            ? combatUpdate
+            : approvedCombatStart
+          : structuredStartCandidate
+            ? {}
         : enforceCombatTurnProgression(
             previousCombatState,
             combatUpdate,
             visibleResponseContent,
           );
+    const bootstrapUpdateWithFallbacks: CampaignBootstrapTurnUpdate =
+      parsedPlayerInput.gmQueryMode
+        ? {}
+        : {
+            ...bootstrapUpdate,
+            ...(bootstrapUpdate.objective
+              ? {}
+              : effectiveScene.goal
+                ? { objective: effectiveScene.goal }
+                : {}),
+            ...(bootstrapUpdate.scene_title
+              ? {}
+              : effectiveScene.sceneTitle
+                ? { scene_title: effectiveScene.sceneTitle }
+                : {}),
+          };
+    const bootstrapPolicy = resolveBootstrapTurnPolicy({
+      currentBootstrap,
+      incomingUpdate: bootstrapUpdateWithFallbacks,
+      effectiveScene,
+      gmQueryMode: parsedPlayerInput.gmQueryMode,
+    });
+    const effectiveBootstrapUpdate = bootstrapPolicy.effectiveUpdate;
+    const nextNoProgressStreak = bootstrapPolicy.nextNoProgressStreak;
     if (debugStateLoggingEnabled) {
       console.log(
         "[chat] deadlandsResourceRouting",
@@ -2400,13 +3463,39 @@ export async function POST(req: NextRequest) {
         "[chat] inferredCombatStart",
         JSON.stringify(inferredCombatStart, null, 2),
       );
+      console.log(
+        "[chat] combatTriggerDecision",
+        JSON.stringify(combatTriggerDecision, null, 2),
+      );
+      console.log("[chat] combatTriggerSource", combatStartCandidateSource);
+      console.log(
+        "[chat] combatStartShadow",
+        JSON.stringify(combatStartShadow, null, 2),
+      );
       console.log("[chat] inferredMajorQuest", inferredMajorQuest ?? "");
       console.log("[chat] effectiveCombatUpdate", JSON.stringify(effectiveCombatUpdate, null, 2));
+      console.log(
+        "[chat] effectiveBootstrapUpdate",
+        JSON.stringify(effectiveBootstrapUpdate, null, 2),
+      );
+      console.log(
+        "[chat] bootstrapLoopPolicy",
+        JSON.stringify(
+          {
+            priorNoProgressStreak: bootstrapPolicy.priorNoProgressStreak,
+            nextNoProgressStreak,
+            loopBreakerApplied: bootstrapPolicy.loopBreakerApplied,
+          },
+          null,
+          2,
+        ),
+      );
     }
     const sceneBlock = formatSceneBlock(effectiveScene);
   const persistedStateBlock = formatStateBlock(effectiveStateUpdates);
   const persistedPartyBlock = formatPartyBlock(effectivePartyUpdate);
   const persistedCombatBlock = formatCombatBlock(effectiveCombatUpdate);
+  const persistedBootstrapBlock = formatCampaignBootstrapBlock(effectiveBootstrapUpdate);
 
   await prisma.message.create({
     data: {
@@ -2454,6 +3543,14 @@ export async function POST(req: NextRequest) {
     (campaign as { combatStateJson?: unknown }).combatStateJson,
     effectiveCombatUpdate,
   );
+  const updatedBootstrapBase = applyCampaignBootstrapTurnUpdate(
+    currentBootstrap,
+    effectiveBootstrapUpdate,
+  );
+  const updatedBootstrap = withBootstrapNoProgressStreak(
+    updatedBootstrapBase,
+    nextNoProgressStreak,
+  );
 
   const characterUpdateOperations = effectiveStateUpdates
     .map((updateInstruction) => {
@@ -2490,9 +3587,11 @@ export async function POST(req: NextRequest) {
         operation !== null,
     );
 
+  const characterPersistStart = Date.now();
   const persistedCharacterUpdates = characterUpdateOperations.length
     ? await Promise.all(characterUpdateOperations)
     : [];
+  phaseTimings.characterPersistMs = Date.now() - characterPersistStart;
 
   for (const updatedCharacter of persistedCharacterUpdates) {
     const index = updatedCharacters.findIndex(
@@ -2504,32 +3603,65 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  const createdMessages = await prisma.$transaction(
-      [
-        prisma.campaign.update({
-          where: { id: campaignId },
-          data: {
-            partyStateJson: updatedPartyState,
-            combatStateJson: updatedCombatState,
-          } as never,
-        }),
-        ...parsedMessages.map((parsedMessage, index) => {
-          const content =
-            parsedMessage.role === "gm" && index === 0
-              ? `${sceneBlock}\n\n${persistedPartyBlock}\n\n${persistedCombatBlock}\n\n${persistedStateBlock}\n\n${parsedMessage.content}`
-              : parsedMessage.content;
+  const buildMessageCreateOperations = () =>
+    parsedMessages.map((parsedMessage, index) => {
+      const content =
+        parsedMessage.role === "gm" && index === 0
+          ? `${sceneBlock}\n\n${persistedPartyBlock}\n\n${persistedCombatBlock}\n\n${persistedBootstrapBlock}\n\n${persistedStateBlock}\n\n${parsedMessage.content}`
+          : parsedMessage.content;
 
-        return prisma.message.create({
+      return prisma.message.create({
         data: {
           campaignId,
           speakerName: parsedMessage.speakerName,
           role: parsedMessage.role,
           content,
-          },
-        });
+        },
+      });
+    });
+
+  let createdMessages: Array<{ content: string }> = [];
+  let bootstrapPersisted = true;
+
+  try {
+    const campaignPersistStart = Date.now();
+    createdMessages = await prisma.$transaction([
+      prisma.campaign.update({
+        where: { id: campaignId },
+        data: {
+          partyStateJson: updatedPartyState,
+          combatStateJson: updatedCombatState,
+          bootstrapJson: updatedBootstrap,
+        } as never,
       }),
-    ],
+      ...buildMessageCreateOperations(),
+    ]);
+    phaseTimings.campaignPersistMs = Date.now() - campaignPersistStart;
+    phaseTimings.campaignPersistFallback = false;
+  } catch (bootstrapPersistError) {
+    bootstrapPersisted = false;
+    console.error(
+      "[chat] bootstrap persistence failed; retrying without bootstrap update",
+      bootstrapPersistError,
     );
+    const campaignPersistFallbackStart = Date.now();
+    createdMessages = await prisma.$transaction([
+      prisma.campaign.update({
+        where: { id: campaignId },
+        data: {
+          partyStateJson: updatedPartyState,
+          combatStateJson: updatedCombatState,
+        } as never,
+      }),
+      ...buildMessageCreateOperations(),
+    ]);
+    phaseTimings.campaignPersistMs = Date.now() - campaignPersistFallbackStart;
+    phaseTimings.campaignPersistFallback = true;
+  }
+  phaseTimings.totalRequestMs = Date.now() - postRequestStart;
+  if (debugStateLoggingEnabled) {
+    console.log("[chat] timing", JSON.stringify(phaseTimings, null, 2));
+  }
 
   return NextResponse.json({
       reply: createdMessages[1]?.content ?? text,
@@ -2537,6 +3669,7 @@ export async function POST(req: NextRequest) {
       characters: updatedCharacters,
       partyStateJson: updatedPartyState,
       combatStateJson: updatedCombatState,
+      bootstrapPublicJson: projectCampaignBootstrapForPlayer(updatedBootstrap),
       ...(debugStateLoggingEnabled
         ? {
             debug: {
@@ -2544,8 +3677,14 @@ export async function POST(req: NextRequest) {
               stateUpdates: effectiveStateUpdates,
               partyUpdate: effectivePartyUpdate,
               combatUpdate: effectiveCombatUpdate,
+              bootstrapUpdate: effectiveBootstrapUpdate,
+              combatShadow: combatStartShadow,
+              bootstrap: updatedBootstrap,
+              bootstrapPersisted,
+              timings: phaseTimings,
             },
           }
         : {}),
     });
   }
+

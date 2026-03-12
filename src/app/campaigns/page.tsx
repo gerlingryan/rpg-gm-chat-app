@@ -164,13 +164,20 @@ export default function CampaignsPage() {
                 Review every saved campaign, resume one, or remove old test runs.
               </p>
             </div>
-
-            <Link
-              href="/"
-              className="rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm font-medium text-slate-200 transition hover:border-white/25 hover:text-white"
-            >
-              Back to Launcher
-            </Link>
+            <div className="flex items-center gap-2">
+              <Link
+                href="/campaigns/new"
+                className="rounded-xl border border-emerald-300/40 bg-emerald-300/10 px-3 py-2 text-sm font-medium text-emerald-100 transition hover:border-emerald-300/70 hover:text-white"
+              >
+                New Campaign
+              </Link>
+              <Link
+                href="/"
+                className="rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm font-medium text-slate-200 transition hover:border-white/25 hover:text-white"
+              >
+                Back to Launcher
+              </Link>
+            </div>
           </div>
         </section>
 

@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useParams, useSearchParams } from "next/navigation";
 import { LibraryCharacterBuilder } from "@/components/LibraryCharacterBuilder";
+import { getDndAsiSummaryFields } from "@/lib/dnd-asi-summary";
 
 type LibraryCharacter = {
   id: string;
@@ -103,6 +104,21 @@ function buildInitialAnswersFromSheet(
   }
 
   if (ruleset.trim().toLowerCase() === "d&d 5e") {
+    if (
+      sheetJson.abilityGenerationSummary &&
+      typeof sheetJson.abilityGenerationSummary === "object" &&
+      !Array.isArray(sheetJson.abilityGenerationSummary)
+    ) {
+      const summary = sheetJson.abilityGenerationSummary as Record<string, unknown>;
+      if (
+        typeof currentAnswers.abilityRollSeed !== "string" &&
+        typeof summary.rollSeed === "string" &&
+        summary.rollSeed.trim()
+      ) {
+        currentAnswers.abilityRollSeed = summary.rollSeed.trim();
+      }
+    }
+
     const characterClass =
       typeof sheetJson.class === "string" ? sheetJson.class.trim() : "";
     const subclass =
@@ -151,9 +167,174 @@ function buildInitialAnswersFromSheet(
         }
       }
     }
+
+    if (
+      sheetJson.derivedStats &&
+      typeof sheetJson.derivedStats === "object" &&
+      !Array.isArray(sheetJson.derivedStats)
+    ) {
+      const derivedStats = sheetJson.derivedStats as Record<string, unknown>;
+      const applied =
+        derivedStats.applied &&
+        typeof derivedStats.applied === "object" &&
+        !Array.isArray(derivedStats.applied)
+          ? (derivedStats.applied as Record<string, unknown>)
+          : {};
+      const overrides =
+        derivedStats.overrides &&
+        typeof derivedStats.overrides === "object" &&
+        !Array.isArray(derivedStats.overrides)
+          ? (derivedStats.overrides as Record<string, unknown>)
+          : {};
+
+      if (typeof overrides.hpMax === "boolean") {
+        currentAnswers.overrideHpMaxEnabled = overrides.hpMax ? "true" : "false";
+      }
+      if (typeof overrides.ac === "boolean") {
+        currentAnswers.overrideAcEnabled = overrides.ac ? "true" : "false";
+      }
+      if (typeof overrides.spellAttackBonus === "boolean") {
+        currentAnswers.overrideSpellAttackBonusEnabled = overrides.spellAttackBonus ? "true" : "false";
+      }
+      if (typeof overrides.spellSaveDc === "boolean") {
+        currentAnswers.overrideSpellSaveDcEnabled = overrides.spellSaveDc ? "true" : "false";
+      }
+      if (typeof applied.hpMax === "number") {
+        currentAnswers.overrideHpMax = applied.hpMax;
+      }
+      if (typeof applied.ac === "number") {
+        currentAnswers.overrideAc = applied.ac;
+      }
+      if (typeof applied.spellAttackBonus === "number") {
+        currentAnswers.overrideSpellAttackBonus = applied.spellAttackBonus;
+      }
+      if (typeof applied.spellSaveDc === "number") {
+        currentAnswers.overrideSpellSaveDc = applied.spellSaveDc;
+      }
+    }
   }
 
   if (ruleset.trim().toLowerCase() === "deadlands classic") {
+    if (typeof currentAnswers.traitGenerationMethod !== "string") {
+      currentAnswers.traitGenerationMethod = "standard-novice";
+    }
+    if (typeof currentAnswers.traitPointBudget !== "number") {
+      currentAnswers.traitPointBudget = 30;
+    }
+    if (typeof currentAnswers.primarySkillDie !== "string") {
+      currentAnswers.primarySkillDie = "10";
+    }
+    if (typeof currentAnswers.secondarySkillDie !== "string") {
+      currentAnswers.secondarySkillDie = "8";
+    }
+    if (typeof currentAnswers.skillBaseDie !== "string") {
+      currentAnswers.skillBaseDie = "6";
+    }
+    if (typeof currentAnswers.skillPointBudget !== "number") {
+      currentAnswers.skillPointBudget = 9;
+    }
+    if (typeof currentAnswers.overridePaceEnabled !== "string") {
+      currentAnswers.overridePaceEnabled = "false";
+    }
+    if (typeof currentAnswers.overrideWindEnabled !== "string") {
+      currentAnswers.overrideWindEnabled = "false";
+    }
+    if (typeof currentAnswers.overrideGritEnabled !== "string") {
+      currentAnswers.overrideGritEnabled = "false";
+    }
+
+    if (
+      sheetJson.derivedStats &&
+      typeof sheetJson.derivedStats === "object" &&
+      !Array.isArray(sheetJson.derivedStats)
+    ) {
+      const derivedStats = sheetJson.derivedStats as Record<string, unknown>;
+      const applied =
+        derivedStats.applied &&
+        typeof derivedStats.applied === "object" &&
+        !Array.isArray(derivedStats.applied)
+          ? (derivedStats.applied as Record<string, unknown>)
+          : {};
+      const overrides =
+        derivedStats.overrides &&
+        typeof derivedStats.overrides === "object" &&
+        !Array.isArray(derivedStats.overrides)
+          ? (derivedStats.overrides as Record<string, unknown>)
+          : {};
+
+      if (typeof overrides.pace === "boolean") {
+        currentAnswers.overridePaceEnabled = overrides.pace ? "true" : "false";
+      }
+      if (typeof overrides.wind === "boolean") {
+        currentAnswers.overrideWindEnabled = overrides.wind ? "true" : "false";
+      }
+      if (typeof overrides.grit === "boolean") {
+        currentAnswers.overrideGritEnabled = overrides.grit ? "true" : "false";
+      }
+      if (typeof applied.pace === "number") {
+        currentAnswers.overridePace = applied.pace;
+      }
+      if (typeof applied.wind === "number") {
+        currentAnswers.overrideWind = applied.wind;
+      }
+      if (typeof applied.grit === "number") {
+        currentAnswers.overrideGrit = applied.grit;
+      }
+    }
+
+    if (
+      sheetJson.abilityGenerationSummary &&
+      typeof sheetJson.abilityGenerationSummary === "object" &&
+      !Array.isArray(sheetJson.abilityGenerationSummary)
+    ) {
+      const generationSummary = sheetJson.abilityGenerationSummary as Record<string, unknown>;
+      if (
+        typeof generationSummary.method === "string" &&
+        generationSummary.method.trim().length > 0
+      ) {
+        currentAnswers.traitGenerationMethod = generationSummary.method;
+      }
+      if (typeof generationSummary.traitPointBudget === "number") {
+        currentAnswers.traitPointBudget = generationSummary.traitPointBudget;
+      }
+      if (typeof generationSummary.skillPointBudget === "number") {
+        currentAnswers.skillPointBudget = generationSummary.skillPointBudget;
+      }
+    }
+
+    if (
+      sheetJson.skillDice &&
+      typeof sheetJson.skillDice === "object" &&
+      !Array.isArray(sheetJson.skillDice)
+    ) {
+      const skillDice = sheetJson.skillDice as Record<string, unknown>;
+      const primarySkill =
+        typeof currentAnswers.primarySkill === "string" ? currentAnswers.primarySkill : "";
+      const secondarySkill =
+        typeof currentAnswers.secondarySkill === "string" ? currentAnswers.secondarySkill : "";
+      const normalizeSkillKey = (value: string) =>
+        value
+          .trim()
+          .toLowerCase()
+          .replace(/['â€™]/g, "")
+          .replace(/[^a-z0-9]+/g, "_")
+          .replace(/^_+|_+$/g, "");
+      const primarySkillKey = normalizeSkillKey(primarySkill);
+      const secondarySkillKey = normalizeSkillKey(secondarySkill);
+
+      if (primarySkillKey && typeof skillDice[primarySkillKey] === "number") {
+        currentAnswers.primarySkillDie = `${skillDice[primarySkillKey]}`;
+      }
+      if (secondarySkillKey && typeof skillDice[secondarySkillKey] === "number") {
+        currentAnswers.secondarySkillDie = `${skillDice[secondarySkillKey]}`;
+      }
+      if (typeof skillDice.dodge === "number") {
+        currentAnswers.skillBaseDie = `${skillDice.dodge}`;
+      } else if (typeof skillDice.guts === "number") {
+        currentAnswers.skillBaseDie = `${skillDice.guts}`;
+      }
+    }
+
     if (
       sheetJson.fateChips &&
       typeof sheetJson.fateChips === "object" &&
@@ -439,6 +620,13 @@ export default function EditCharacterPage() {
         : {},
     [character],
   );
+  const dndAbilitySummaryFields = useMemo(
+    () =>
+      character && character.ruleset.trim().toLowerCase() === "d&d 5e"
+        ? getDndAsiSummaryFields(character.sheetJson)
+        : [],
+    [character],
+  );
 
   if (!character && !error) {
     return (
@@ -472,9 +660,12 @@ export default function EditCharacterPage() {
       returnTo={returnTo}
       backHref={returnTo}
       backLabel="Back to Library"
-      headingKicker="Character Library"
-      headingTitle="Edit Reusable Character"
-      headingDescription="Update this reusable library character and future campaign imports will use the new version."
+      headingKicker="Character Edit"
+      headingTitle=""
+      headingDescription=""
+      headingFacts={dndAbilitySummaryFields}
+      showHeading={false}
+      showInlineHeaderWhenNoHero
     />
   );
 }

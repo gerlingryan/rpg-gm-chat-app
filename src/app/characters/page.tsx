@@ -4,17 +4,13 @@ import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import Image from "next/image";
 import { useSearchParams } from "next/navigation";
+import { getDndAsiSummaryText } from "@/lib/dnd-asi-summary";
+import { appendQueryParamsToPath } from "@/lib/navigation";
 
 const RULESET_OPTIONS = [
   "D&D 5e",
   "Deadlands Classic",
   "Savage Rifts",
-  "Mutants in the Now",
-  "Astonishing Super Heroes",
-  "Star Wars RPG",
-  "Legend of 5 Rings 4e",
-  "Vampire: The Masqureade V5",
-  "Call of Cthulhu",
 ] as const;
 
 type LibraryCharacter = {
@@ -372,9 +368,10 @@ export default function CharacterLibraryPage() {
                           {deletingCharacterId === character.id ? "Removing..." : "Remove"}
                         </button>
                         <Link
-                          href={`${returnTo}?ruleset=${encodeURIComponent(
-                            selectedRuleset,
-                          )}&libraryCharacterId=${encodeURIComponent(character.id)}`}
+                          href={appendQueryParamsToPath(returnTo, {
+                            ruleset: selectedRuleset,
+                            libraryCharacterId: character.id,
+                          })}
                           className="rounded-xl border border-cyan-300/40 bg-cyan-300/10 px-3 py-2 text-sm font-medium text-cyan-100 transition hover:border-cyan-300/70 hover:text-white"
                         >
                           {isCompanionFlow ? "Choose Companion" : "Use on Launcher"}
@@ -385,6 +382,11 @@ export default function CharacterLibraryPage() {
                     {buildCharacterPreview(character) ? (
                       <p className="mt-2 line-clamp-2 text-sm leading-6 text-slate-300">
                         {buildCharacterPreview(character)}
+                      </p>
+                    ) : null}
+                    {getDndAsiSummaryText(character.sheetJson) ? (
+                      <p className="mt-2 text-xs text-cyan-100/85">
+                        {getDndAsiSummaryText(character.sheetJson)}
                       </p>
                     ) : null}
 

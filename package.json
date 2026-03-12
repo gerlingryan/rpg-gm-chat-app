@@ -10,7 +10,15 @@
     "test:combat": "tsx --test src/lib/__tests__/combat-engine.test.ts",
     "test:coach": "tsx --test src/lib/__tests__/character-coach.test.ts",
     "test:campaign": "tsx --test src/lib/__tests__/campaign-characters.test.ts",
-    "test:lib": "pnpm test:combat && pnpm test:coach && pnpm test:campaign"
+    "test:bootstrap": "tsx --test src/lib/__tests__/campaign-bootstrap.test.ts",
+    "test:bootstrap-reducer": "tsx --test src/lib/__tests__/campaign-bootstrap-reducer.test.ts",
+    "test:bootstrap-loop-breaker": "tsx --test src/lib/__tests__/bootstrap-loop-breaker.test.ts",
+    "test:navigation": "tsx --test src/lib/__tests__/navigation.test.ts",
+    "test:dnd-ability": "tsx --test src/lib/__tests__/dnd-ability-generation.test.ts",
+    "test:dnd-builder": "tsx --test src/lib/__tests__/dnd-builder-interactions.test.ts",
+    "test:dnd-asi-summary": "tsx --test src/lib/__tests__/dnd-asi-summary.test.ts",
+    "test:lib": "pnpm test:combat && pnpm test:coach && pnpm test:campaign && pnpm test:bootstrap && pnpm test:bootstrap-reducer && pnpm test:bootstrap-loop-breaker && pnpm test:navigation && pnpm test:dnd-ability && pnpm test:dnd-builder && pnpm test:dnd-asi-summary",
+    "backfill:dnd-ability": "tsx scripts/backfill-dnd-ability-metadata.ts"
   },
   "dependencies": {
     "@prisma/adapter-pg": "^7.4.2",

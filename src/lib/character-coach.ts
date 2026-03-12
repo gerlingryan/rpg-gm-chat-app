@@ -1,13 +1,58 @@
-export type CoachFieldId = "personality" | "background" | "physicalDescription";
+export type CoachFieldId = "name" | "personality" | "background" | "physicalDescription";
+
+export function shouldGenerateFieldSuggestions(params: {
+  message: string;
+  explicitTargetField: "auto" | CoachFieldId;
+  requestedFields: Set<CoachFieldId>;
+  requestedOptionCount: number | null;
+}) {
+  if (params.explicitTargetField !== "auto") {
+    return true;
+  }
+  if (params.requestedFields.size > 0) {
+    return true;
+  }
+  if (params.requestedOptionCount !== null) {
+    return true;
+  }
+
+  // If the user asks for writing/creation help without naming a specific field,
+  // still allow suggestions/options. Otherwise keep responses advisory-only.
+  return /\b(idea|ideas|option|options|suggest|suggestion|draft|rewrite|reword|variant|generate|create)\b/i.test(
+    params.message,
+  );
+}
 
 export function extractRequestedOptionCount(message: string) {
-  const explicitNumber = message.match(/\b(\d{1,2})\s+(?:personality\s+)?options?\b/i);
-  if (explicitNumber) {
-    const parsed = Number(explicitNumber[1]);
+  const toClampedCount = (raw: string | undefined) => {
+    if (!raw) {
+      return null;
+    }
+    const parsed = Number(raw);
     if (Number.isFinite(parsed)) {
       return Math.max(1, Math.min(10, Math.trunc(parsed)));
     }
+    return null;
+  };
+
+  // Examples:
+  // - "give me 3 options"
+  // - "give me 7 more names"
+  // - "need 5 background ideas"
+  const explicitNumber = message.match(
+    /\b(\d{1,2})\s+(?:more\s+)?(?:personality\s+)?(?:name|names|options?|ideas?|backgrounds?|backstories|physical(?:\s+description)?s?)\b/i,
+  );
+  const explicitCount = toClampedCount(explicitNumber?.[1]);
+  if (explicitCount !== null) {
+    return explicitCount;
   }
+
+  // Fallback: any explicit leading count phrase still hints desired quantity.
+  const genericCount = toClampedCount(message.match(/\b(\d{1,2})\b/)?.[1]);
+  if (genericCount !== null && /\b(more|another|additional|extra|new)\b/i.test(message)) {
+    return genericCount;
+  }
+
   if (/\bseveral\b/i.test(message) || /\bfew\b/i.test(message)) {
     return 3;
   }
@@ -18,6 +63,9 @@ export function extractRequestedFields(message: string) {
   const lower = message.toLowerCase();
   const requested = new Set<CoachFieldId>();
 
+  if (/\bname\b|\bnames\b|\brename\b|\bnaming\b/.test(lower)) {
+    requested.add("name");
+  }
   if (/\bpersonality\b|\bvoice\b|\bdemeanor\b|\btemperament\b/.test(lower)) {
     requested.add("personality");
   }
@@ -55,11 +103,15 @@ export function clampText(value: unknown, maxLength: number) {
 
 export function formatCoachReplyWithSections(params: {
   reply: string;
+  nameCount: number;
   personalityCount: number;
   backgroundCount: number;
   physicalCount: number;
 }) {
   const headers: string[] = [];
+  if (params.nameCount > 0) {
+    headers.push("Name");
+  }
   if (params.personalityCount > 0) {
     headers.push("Personality");
   }
@@ -72,7 +124,7 @@ export function formatCoachReplyWithSections(params: {
   if (headers.length === 0) {
     return params.reply;
   }
-  return `${params.reply}\n\nSections: ${headers.join(" • ")} options`;
+  return `${params.reply}\n\nSections: ${headers.join(" | ")} options`;
 }
 
 export function normalizeCoachApiResponse(raw: unknown) {
@@ -108,14 +160,18 @@ export function normalizeCoachApiResponse(raw: unknown) {
   const normalized = {
     message: {
       role: "assistant" as const,
-      content: messageContent || "I can help refine personality, background, or physical description.",
+      content:
+        messageContent ||
+        "I can help refine name, personality, background, or physical description.",
     },
     suggestions: {
+      name: clampText(suggestionsSource.name, 120) || undefined,
       personality: clampText(suggestionsSource.personality, 1000) || undefined,
       background: clampText(suggestionsSource.background, 1800) || undefined,
       physicalDescription: clampText(suggestionsSource.physicalDescription, 700) || undefined,
     },
     options: {
+      nameOptions: readOptions(optionsSource.nameOptions),
       personalityOptions: readOptions(optionsSource.personalityOptions),
       backgroundOptions: readOptions(optionsSource.backgroundOptions),
       physicalDescriptionOptions: readOptions(optionsSource.physicalDescriptionOptions),
@@ -125,10 +181,12 @@ export function normalizeCoachApiResponse(raw: unknown) {
   };
 
   const hasSuggestions =
+    Boolean(normalized.suggestions.name) ||
     Boolean(normalized.suggestions.personality) ||
     Boolean(normalized.suggestions.background) ||
     Boolean(normalized.suggestions.physicalDescription);
   const hasOptions =
+    normalized.options.nameOptions.length > 0 ||
     normalized.options.personalityOptions.length > 0 ||
     normalized.options.backgroundOptions.length > 0 ||
     normalized.options.physicalDescriptionOptions.length > 0;

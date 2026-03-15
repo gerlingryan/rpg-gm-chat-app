@@ -6,6 +6,13 @@ type CharacterLike = {
   sheetJson: Record<string, unknown> | null;
 };
 
+type CombatantRuntimeLike = {
+  armorClass?: number;
+  attackBonusOverride?: number;
+  damageDieOverride?: number;
+  damageBonusOverride?: number;
+};
+
 export type InitiativeContext = {
   ruleset: string;
   rosterType: "character" | "enemy" | "npc";
@@ -18,6 +25,8 @@ export type AttackDefaultsContext = {
   actorType: "character" | "enemy" | "npc";
   actorCharacter: CharacterLike | null;
   targetCharacter: CharacterLike | null;
+  actorRuntime?: CombatantRuntimeLike | null;
+  targetRuntime?: CombatantRuntimeLike | null;
 };
 
 export type AttackDefaults = {
@@ -366,32 +375,42 @@ export function getInitiativeModifier(context: InitiativeContext) {
 export function getAttackDefaults(context: AttackDefaultsContext): AttackDefaults {
   const actorSheet = context.actorCharacter?.sheetJson;
   const targetSheet = context.targetCharacter?.sheetJson;
+  const actorRuntime = context.actorRuntime ?? null;
+  const targetRuntime = context.targetRuntime ?? null;
   const actorLevel = getCharacterLevel(actorSheet);
   const targetLevel = getCharacterLevel(targetSheet);
 
   if (isDndRuleset(context.ruleset)) {
-    const attackBonus = getFirstNumber(actorSheet, [
-      ["attackBonus"],
-      ["attacks", "melee", "toHit"],
-      ["attacks", "spell", "toHit"],
-      ["proficiencyBonus"],
-    ]);
-    const targetAc = getFirstNumber(targetSheet, [
-      ["ac"],
-      ["armorClass"],
-      ["defense", "ac"],
-    ]);
-    const damageDie = getFirstNumber(actorSheet, [
-      ["damageDie"],
-      ["attacks", "melee", "damageDie"],
-      ["weapon", "damageDie"],
-    ]);
-    const damageBonus = getFirstNumber(actorSheet, [
-      ["damageBonus"],
-      ["attacks", "melee", "damageBonus"],
-      ["abilities", "str", "modifier"],
-      ["spellcasting", "modifier"],
-    ]);
+    const attackBonus =
+      parseFiniteNumber(actorRuntime?.attackBonusOverride) ??
+      getFirstNumber(actorSheet, [
+        ["attackBonus"],
+        ["attacks", "melee", "toHit"],
+        ["attacks", "spell", "toHit"],
+        ["proficiencyBonus"],
+      ]);
+    const targetAc =
+      parseFiniteNumber(targetRuntime?.armorClass) ??
+      getFirstNumber(targetSheet, [
+        ["ac"],
+        ["armorClass"],
+        ["defense", "ac"],
+      ]);
+    const damageDie =
+      parseFiniteNumber(actorRuntime?.damageDieOverride) ??
+      getFirstNumber(actorSheet, [
+        ["damageDie"],
+        ["attacks", "melee", "damageDie"],
+        ["weapon", "damageDie"],
+      ]);
+    const damageBonus =
+      parseFiniteNumber(actorRuntime?.damageBonusOverride) ??
+      getFirstNumber(actorSheet, [
+        ["damageBonus"],
+        ["attacks", "melee", "damageBonus"],
+        ["abilities", "str", "modifier"],
+        ["spellcasting", "modifier"],
+      ]);
 
     const inferredEnemyAttackBonus =
       targetLevel <= 2 ? 2 : targetLevel <= 5 ? 3 : targetLevel <= 10 ? 4 : 5;
@@ -462,12 +481,14 @@ export function getAttackDefaults(context: AttackDefaultsContext): AttackDefault
       ["traits", "fighting", "die"],
       ["traits", "deftness", "die"],
     ]);
-    const targetTn = getFirstNumber(targetSheet, [
-      ["targetNumber"],
-      ["tn"],
-      ["defense", "tn"],
-      ["parry"],
-    ]);
+    const targetTn =
+      parseFiniteNumber(targetRuntime?.armorClass) ??
+      getFirstNumber(targetSheet, [
+        ["targetNumber"],
+        ["tn"],
+        ["defense", "tn"],
+        ["parry"],
+      ]);
     const weaponProfile = getDeadlandsWeaponProfile(actorSheet);
     const weaponName = weaponProfile?.weaponName ?? "";
     const isRangedWeapon = /(revolver|peacemaker|schofield|pistol|rifle|repeater|longarm|shotgun|bow|crossbow)/i.test(
@@ -490,16 +511,20 @@ export function getAttackDefaults(context: AttackDefaultsContext): AttackDefault
     );
     const derivedSkillDie =
       skillMatchScore >= 2 ? baseSkillDie + 2 : skillMatchScore >= 1 ? baseSkillDie : baseSkillDie - 2;
-    const damageDie = getFirstNumber(actorSheet, [
-      ["damageDie"],
-      ["weapon", "damageDie"],
-      ["damage", "die"],
-    ]);
-    const damageBonus = getFirstNumber(actorSheet, [
-      ["damageBonus"],
-      ["strength", "modifier"],
-      ["damage", "bonus"],
-    ]);
+    const damageDie =
+      parseFiniteNumber(actorRuntime?.damageDieOverride) ??
+      getFirstNumber(actorSheet, [
+        ["damageDie"],
+        ["weapon", "damageDie"],
+        ["damage", "die"],
+      ]);
+    const damageBonus =
+      parseFiniteNumber(actorRuntime?.damageBonusOverride) ??
+      getFirstNumber(actorSheet, [
+        ["damageBonus"],
+        ["strength", "modifier"],
+        ["damage", "bonus"],
+      ]);
 
     const inferredEnemyAttackBonus =
       targetLevel <= 2 ? 0 : targetLevel <= 5 ? 1 : targetLevel <= 10 ? 2 : 3;
@@ -525,6 +550,7 @@ export function getAttackDefaults(context: AttackDefaultsContext): AttackDefault
       attackDie: clampInteger(explicitSkillDie ?? fightingDie ?? derivedSkillDie, 4, 20),
       attackBonus: clampInteger(
         weaponProfile?.attackBonus ??
+          parseFiniteNumber(actorRuntime?.attackBonusOverride) ??
           fightingBonus ??
           (context.actorType === "enemy"
             ? inferredEnemyAttackBonus
@@ -561,28 +587,36 @@ export function getAttackDefaults(context: AttackDefaultsContext): AttackDefault
   }
 
   if (isSavageRiftsRuleset(context.ruleset)) {
-    const attackBonus = getFirstNumber(actorSheet, [
-      ["attackBonus"],
-      ["attacks", "melee", "toHit"],
-      ["attacks", "ranged", "toHit"],
-      ["proficiencyBonus"],
-    ]);
-    const targetAc = getFirstNumber(targetSheet, [
-      ["ac"],
-      ["armorClass"],
-      ["defense", "ac"],
-      ["mdc"],
-    ]);
-    const damageDie = getFirstNumber(actorSheet, [
-      ["damageDie"],
-      ["attacks", "melee", "damageDie"],
-      ["weapon", "damageDie"],
-    ]);
-    const damageBonus = getFirstNumber(actorSheet, [
-      ["damageBonus"],
-      ["attacks", "melee", "damageBonus"],
-      ["abilities", "str", "modifier"],
-    ]);
+    const attackBonus =
+      parseFiniteNumber(actorRuntime?.attackBonusOverride) ??
+      getFirstNumber(actorSheet, [
+        ["attackBonus"],
+        ["attacks", "melee", "toHit"],
+        ["attacks", "ranged", "toHit"],
+        ["proficiencyBonus"],
+      ]);
+    const targetAc =
+      parseFiniteNumber(targetRuntime?.armorClass) ??
+      getFirstNumber(targetSheet, [
+        ["ac"],
+        ["armorClass"],
+        ["defense", "ac"],
+        ["mdc"],
+      ]);
+    const damageDie =
+      parseFiniteNumber(actorRuntime?.damageDieOverride) ??
+      getFirstNumber(actorSheet, [
+        ["damageDie"],
+        ["attacks", "melee", "damageDie"],
+        ["weapon", "damageDie"],
+      ]);
+    const damageBonus =
+      parseFiniteNumber(actorRuntime?.damageBonusOverride) ??
+      getFirstNumber(actorSheet, [
+        ["damageBonus"],
+        ["attacks", "melee", "damageBonus"],
+        ["abilities", "str", "modifier"],
+      ]);
 
     const inferredEnemyAttackBonus =
       targetLevel <= 2 ? 2 : targetLevel <= 5 ? 3 : targetLevel <= 10 ? 4 : 5;

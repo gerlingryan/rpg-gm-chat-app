@@ -99,6 +99,8 @@ function applyDebugBootstrapAction(
     typeof body.encounterVariance === "string"
       ? body.encounterVariance.trim().toLowerCase()
       : "";
+  const encounterIntentRaw =
+    typeof body.encounterIntent === "string" ? body.encounterIntent.trim().toLowerCase() : "";
   const difficultyMode =
     difficultyModeRaw === "cinematic" ||
     difficultyModeRaw === "standard" ||
@@ -108,6 +110,12 @@ function applyDebugBootstrapAction(
   const encounterVariance =
     varianceRaw === "low" || varianceRaw === "medium" || varianceRaw === "high"
       ? varianceRaw
+      : null;
+  const encounterIntent =
+    encounterIntentRaw === "easy" ||
+    encounterIntentRaw === "standard" ||
+    encounterIntentRaw === "hard"
+      ? encounterIntentRaw
       : null;
 
   if (action === "advance-clock") {
@@ -147,7 +155,7 @@ function applyDebugBootstrapAction(
   }
 
   if (action === "set-combat-generation") {
-    if (!difficultyMode && !encounterVariance) {
+    if (!difficultyMode && !encounterVariance && !encounterIntent) {
       return bootstrap;
     }
 
@@ -157,12 +165,13 @@ function applyDebugBootstrapAction(
         ...bootstrap.combat_generation,
         ...(difficultyMode ? { difficultyMode } : {}),
         ...(encounterVariance ? { encounterVariance } : {}),
+        ...(encounterIntent ? { encounterIntent } : {}),
       },
       gm_notes: {
         ...bootstrap.gm_notes,
         offscreen_pressure: [
           ...bootstrap.gm_notes.offscreen_pressure,
-          `Debug override: combat_generation set to ${difficultyMode ?? bootstrap.combat_generation.difficultyMode}/${encounterVariance ?? bootstrap.combat_generation.encounterVariance}.`,
+          `Debug override: combat_generation set to ${difficultyMode ?? bootstrap.combat_generation.difficultyMode}/${encounterVariance ?? bootstrap.combat_generation.encounterVariance}/${encounterIntent ?? bootstrap.combat_generation.encounterIntent}.`,
         ].slice(-20),
       },
     };

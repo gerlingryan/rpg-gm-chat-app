@@ -1,5 +1,11 @@
 import { openai } from "@/lib/openai";
 import {
+  BATTLE_GRID_PRESETS,
+  DEFAULT_BATTLE_GRID_PRESET,
+  DEFAULT_BATTLE_TILE_SIZE_PX,
+  type BattleGridPreset,
+} from "@/lib/battle-map-grid";
+import {
   DEFAULT_SCENE_SUMMARY,
   extractSceneBlock,
   type SceneSummary,
@@ -18,6 +24,9 @@ export type SceneMapState = {
 };
 
 export type SceneImageHistoryEntry = SceneMapState;
+
+export type { BattleGridPreset };
+export { BATTLE_GRID_PRESETS, DEFAULT_BATTLE_GRID_PRESET, DEFAULT_BATTLE_TILE_SIZE_PX };
 
 export type WorldMapPin = {
   id: string;

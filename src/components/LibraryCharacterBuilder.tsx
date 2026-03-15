@@ -44,6 +44,14 @@ const DEFAULT_PORTRAIT_DATA_URL =
   );
 
 const EMPTY_ANSWERS: Record<string, string | number> = {};
+const TOKEN_STYLE_OPTIONS = [
+  { id: "stone-base", label: "Stone Base" },
+  { id: "no-scenic-base", label: "No Base / Invisible Base" },
+  { id: "grass-base", label: "Grass Base" },
+  { id: "dirt-base", label: "Dirt Base" },
+] as const;
+
+type TokenStylePreset = (typeof TOKEN_STYLE_OPTIONS)[number]["id"];
 
 type LibraryCharacterBuilderProps = {
   mode: "create" | "edit";
@@ -191,6 +199,9 @@ export function LibraryCharacterBuilder({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isGeneratingPortrait, setIsGeneratingPortrait] = useState(false);
   const [isGeneratingToken, setIsGeneratingToken] = useState(false);
+  const [tokenStylePreset, setTokenStylePreset] = useState<TokenStylePreset>("stone-base");
+  const [showTokenPromptPreview, setShowTokenPromptPreview] = useState(false);
+  const [lastGeneratedTokenPrompt, setLastGeneratedTokenPrompt] = useState("");
   const [expandedPreviewImage, setExpandedPreviewImage] = useState<{
     src: string;
     alt: string;
@@ -1315,6 +1326,7 @@ export function LibraryCharacterBuilder({
           name: characterName.trim() || "Character",
           ruleset: selectedRuleset,
           physicalDescription,
+          stylePreset: tokenStylePreset,
         }),
       });
       const data = await response.json();
@@ -1382,6 +1394,7 @@ export function LibraryCharacterBuilder({
           name: characterName.trim() || "Character",
           ruleset: selectedRuleset,
           physicalDescription,
+          stylePreset: tokenStylePreset,
         }),
       });
       const data = await response.json();
@@ -1389,6 +1402,9 @@ export function LibraryCharacterBuilder({
       if (!response.ok || typeof data.tokenDataUrl !== "string") {
         throw new Error(data.error ?? "Unable to generate token.");
       }
+      setLastGeneratedTokenPrompt(
+        typeof data.tokenPrompt === "string" ? data.tokenPrompt : "",
+      );
 
       setAnswers((currentAnswers) => ({
         ...currentAnswers,
@@ -2973,6 +2989,26 @@ export function LibraryCharacterBuilder({
                       onChange={handlePortraitUpload}
                     />
                   </label>
+                  <label className="inline-flex items-center gap-2 rounded-xl border border-white/10 bg-slate-950/70 px-3 py-2 text-sm font-medium text-slate-200">
+                    <span>Token style</span>
+                    <select
+                      value={tokenStylePreset}
+                      onChange={(event) =>
+                        setTokenStylePreset(
+                          (TOKEN_STYLE_OPTIONS.find(
+                            (option) => option.id === event.target.value,
+                          )?.id ?? "stone-base") as TokenStylePreset,
+                        )
+                      }
+                      className="rounded-md border border-zinc-700 bg-zinc-950 px-2 py-1 text-xs text-zinc-100 outline-none focus:border-zinc-500"
+                    >
+                      {TOKEN_STYLE_OPTIONS.map((option) => (
+                        <option key={option.id} value={option.id}>
+                          {option.label}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
                   <button
                     type="button"
                     onClick={handleGenerateToken}
@@ -2996,6 +3032,20 @@ export function LibraryCharacterBuilder({
                     />
                   </label>
                 </div>
+                <div className="mt-2">
+                  <button
+                    type="button"
+                    onClick={() => setShowTokenPromptPreview((current) => !current)}
+                    className="rounded-xl border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-[11px] text-zinc-200 transition hover:border-zinc-500"
+                  >
+                    {showTokenPromptPreview ? "Hide Token Prompt" : "Show Token Prompt"}
+                  </button>
+                </div>
+                {showTokenPromptPreview ? (
+                  <pre className="mt-2 max-h-40 overflow-auto rounded-lg border border-zinc-800 bg-zinc-950 p-2 text-[11px] leading-5 text-zinc-300">
+                    {lastGeneratedTokenPrompt || "Generate a token to see the exact prompt used."}
+                  </pre>
+                ) : null}
 
                 {partitionedQuestions.physicalDescriptionQuestion ? (
                   <CharacterQuestionField

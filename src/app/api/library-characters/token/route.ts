@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { openai } from "@/lib/openai";
-import {
-  buildSceneImagePromptFromSections,
-  getSceneImageInstructionTemplate,
-  getSceneImageStyleTemplate,
-} from "@/lib/map-prompt";
+import { buildTokenPrompt } from "@/lib/token-library";
 
 export async function POST(req: NextRequest) {
   const body = await req.json();
@@ -16,6 +12,15 @@ export async function POST(req: NextRequest) {
     typeof body.name === "string" ? body.name.trim() : "Character";
   const ruleset =
     typeof body.ruleset === "string" ? body.ruleset.trim() : "";
+  const stylePresetRaw =
+    typeof body.stylePreset === "string" ? body.stylePreset.trim().toLowerCase() : "";
+  const stylePreset =
+    stylePresetRaw === "stone-base" ||
+    stylePresetRaw === "no-scenic-base" ||
+    stylePresetRaw === "grass-base" ||
+    stylePresetRaw === "dirt-base"
+      ? stylePresetRaw
+      : "stone-base";
 
   if (!ruleset) {
     return NextResponse.json(
@@ -31,10 +36,11 @@ export async function POST(req: NextRequest) {
     );
   }
 
-  const tokenPrompt = buildSceneImagePromptFromSections({
-    instructions: getSceneImageInstructionTemplate("character-token", ruleset),
+  const tokenPrompt = buildTokenPrompt({
+    ruleset,
+    label: characterName,
     customDescription: `Character name: ${characterName}. Physical description: ${physicalDescription}.`,
-    styleDescription: getSceneImageStyleTemplate("stone-base"),
+    style: stylePreset,
   });
 
   const generateToken = async (withTransparentBackground: boolean) => {
@@ -78,6 +84,7 @@ export async function POST(req: NextRequest) {
 
   return NextResponse.json({
     tokenDataUrl: `data:image/png;base64,${b64Json}`,
+    stylePreset,
+    tokenPrompt,
   });
 }
-

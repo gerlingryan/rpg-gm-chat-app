@@ -2389,6 +2389,12 @@ function inferEnemyGroupFromNarration(content: string) {
   if (/\bgoblin(?:s)?\b/i.test(content)) {
     return { name: "Goblin", count: 4 };
   }
+  if (/\bguard(?:s)?\b/i.test(content)) {
+    return { name: "Guard", count: 3 };
+  }
+  if (/\bmerchant(?:s)?\b/i.test(content) && /\b(brawl|fight|melee|riot)\b/i.test(content)) {
+    return { name: "Hostile Merchant", count: 2 };
+  }
   if (/\bbandit(?:s)?\b/i.test(content)) {
     return { name: "Bandit", count: 3 };
   }
@@ -2400,6 +2406,9 @@ function inferEnemyGroupFromNarration(content: string) {
   }
   if (/\bgang lieutenant\b/i.test(content)) {
     return { name: "Gang Hostile", count: 3 };
+  }
+  if (/\b(brawl|fight|melee|combat|hostile|ambush|attack)\b/i.test(content)) {
+    return { name: "Hostile", count: 3 };
   }
 
   return null;
@@ -3242,8 +3251,22 @@ export async function POST(req: NextRequest) {
     const combatUpdate =
       extractedCombat.found && extractedCombat.update ? extractedCombat.update : {};
     const hasStructuredCombatUpdate = Object.keys(combatUpdate).length > 0;
+    const structuredCombatRoster = Array.isArray(combatUpdate.roster)
+      ? combatUpdate.roster.filter(
+          (entry): entry is { type?: string; name?: string } =>
+            Boolean(entry) && typeof entry === "object" && !Array.isArray(entry),
+        )
+      : [];
+    const structuredRosterHasOpposition = structuredCombatRoster.some((entry) => {
+      const rawType = typeof entry.type === "string" ? entry.type.trim().toLowerCase() : "";
+      return rawType === "enemy" || rawType === "npc";
+    });
+    const structuredStartRosterUsable =
+      structuredCombatRoster.length >= 2 && structuredRosterHasOpposition;
     const hasStructuredCombatStartRequest =
-      hasStructuredCombatUpdate && combatUpdate.combatActive === true;
+      hasStructuredCombatUpdate &&
+      combatUpdate.combatActive === true &&
+      structuredStartRosterUsable;
     const structuredStartCandidate =
       !parsedPlayerInput.gmQueryMode &&
       hasStructuredCombatStartRequest
@@ -3292,6 +3315,18 @@ export async function POST(req: NextRequest) {
       console.log("[chat] stateUpdates", JSON.stringify(stateUpdates, null, 2));
       console.log("[chat] partyUpdate", JSON.stringify(partyUpdate, null, 2));
       console.log("[chat] combatUpdate", JSON.stringify(combatUpdate, null, 2));
+      console.log(
+        "[chat] structuredCombatStartUsable",
+        JSON.stringify(
+          {
+            rosterCount: structuredCombatRoster.length,
+            hasOpposition: structuredRosterHasOpposition,
+            usable: structuredStartRosterUsable,
+          },
+          null,
+          2,
+        ),
+      );
       console.log("[chat] bootstrapUpdate", JSON.stringify(bootstrapUpdate, null, 2));
     }
     const safeScene = buildFallbackSceneSummary(campaign);

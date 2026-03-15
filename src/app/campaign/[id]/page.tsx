@@ -72,6 +72,11 @@ import {
   normalizeChoiceTextForDisplay,
 } from "@/lib/chat-display";
 import { useBootstrapDebugTools } from "@/hooks/useBootstrapDebugTools";
+import { useCombatCheckpointPersistence } from "@/hooks/useCombatCheckpointPersistence";
+import { useCombatTrace } from "@/hooks/useCombatTrace";
+import { useAutoEnemyPlanner } from "@/hooks/useAutoEnemyPlanner";
+import { useCombatAutoTurns } from "@/hooks/useCombatAutoTurns";
+import { getBattleLocationCatalogForRuleset } from "@/lib/battle-map-catalog";
 
 type ChatMessage = {
   id?: string;
@@ -119,6 +124,112 @@ type CampaignDetails = {
   sceneImageHistoryJson: SceneImageHistoryEntry[];
   characters: CampaignCharacter[];
 };
+
+type CombatMapTemplateView = {
+  id: string;
+  title: string;
+  locationKey: string;
+  ruleset: string;
+  gridCols: number;
+  gridRows: number;
+  imageDataUrl: string | null;
+  referenceUrl: string | null;
+  blockedTilesJson?: unknown;
+};
+
+function normalizeTileCoordinatesForDisplay(value: unknown) {
+  if (!Array.isArray(value)) {
+    return [] as Array<[number, number]>;
+  }
+  const output: Array<[number, number]> = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    let x = Number.NaN;
+    let y = Number.NaN;
+    if (Array.isArray(entry) && entry.length >= 2) {
+      x = Number(entry[0]);
+      y = Number(entry[1]);
+    } else if (entry && typeof entry === "object") {
+      const typed = entry as Record<string, unknown>;
+      x = Number(typed.x);
+      y = Number(typed.y);
+    }
+    if (!Number.isFinite(x) || !Number.isFinite(y)) {
+      continue;
+    }
+    const xi = Math.max(0, Math.trunc(x));
+    const yi = Math.max(0, Math.trunc(y));
+    const key = `${xi},${yi}`;
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    output.push([xi, yi]);
+  }
+  return output;
+}
+
+function inferClientBattleMapLocationKey(params: {
+  ruleset: string;
+  sceneLocation: string;
+  sceneTitle: string;
+}) {
+  const catalog = getBattleLocationCatalogForRuleset(params.ruleset);
+  const haystack = `${params.sceneLocation} ${params.sceneTitle}`.trim().toLowerCase();
+  if (!haystack) {
+    if (catalog.some((entry) => entry.key === "forest_path")) {
+      return "forest_path";
+    }
+    return catalog[0]?.key ?? "";
+  }
+
+  const weightedAliases: Array<{ key: string; tokens: string[] }> = [
+    {
+      key: "forest_path",
+      tokens: ["forest", "wood", "woods", "woodland", "trail", "path", "clearing", "grove"],
+    },
+    { key: "cave", tokens: ["cave", "cavern", "grotto"] },
+    { key: "graveyard", tokens: ["grave", "graveyard", "cemetery", "crypt", "tomb"] },
+    { key: "tavern", tokens: ["tavern", "inn", "taproom", "alehouse"] },
+    { key: "city_street", tokens: ["street", "city", "alley", "plaza", "market", "road"] },
+    { key: "saloon", tokens: ["saloon"] },
+    { key: "dusty_main_street", tokens: ["main street", "dusty street"] },
+    { key: "rail_yard", tokens: ["rail yard", "train yard", "tracks"] },
+    { key: "canyon", tokens: ["canyon", "gulch"] },
+    { key: "mine", tokens: ["mine", "mineshaft"] },
+    { key: "ranch", tokens: ["ranch", "homestead"] },
+  ];
+
+  for (const alias of weightedAliases) {
+    if (!catalog.some((entry) => entry.key === alias.key)) {
+      continue;
+    }
+    if (alias.tokens.some((token) => haystack.includes(token))) {
+      return alias.key;
+    }
+  }
+
+  for (const entry of catalog) {
+    const keyTokens = entry.key.split(/[_\s-]+/).filter(Boolean);
+    const labelTokens = entry.label
+      .toLowerCase()
+      .split(/[\s-]+/)
+      .filter(Boolean);
+    if (haystack.includes(entry.key.toLowerCase()) || haystack.includes(entry.label.toLowerCase())) {
+      return entry.key;
+    }
+    if (keyTokens.some((token) => token.length >= 3 && haystack.includes(token))) {
+      return entry.key;
+    }
+    if (labelTokens.some((token) => token.length >= 3 && haystack.includes(token))) {
+      return entry.key;
+    }
+  }
+  if (catalog.some((entry) => entry.key === "forest_path")) {
+    return "forest_path";
+  }
+  return catalog[0]?.key ?? "";
+}
 
 function normalizeBootstrapPublicView(value: unknown): CampaignBootstrapPlayerView | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -286,13 +397,6 @@ type CombatEngineLogEntry = {
   text: string;
 };
 
-type CombatTraceEntry = {
-  id: string;
-  timestamp: string;
-  phase: string;
-  payload: unknown;
-};
-
 type PendingReactionState = {
   actorRef: string;
   targetRef: string;
@@ -343,6 +447,8 @@ type AttackActionPreset = {
   category: "weapon" | "spell";
 };
 
+type AttackRangeMode = "melee" | "ranged";
+
 export default function CampaignPage() {
   const params = useParams();
   const campaignId = params.id as string;
@@ -379,7 +485,7 @@ export default function CampaignPage() {
   const [combatAttackPresetId, setCombatAttackPresetId] = useState("basic");
   const [combatSpellSlotLevel, setCombatSpellSlotLevel] = useState("");
   const [combatEngineLogEntries, setCombatEngineLogEntries] = useState<CombatEngineLogEntry[]>([]);
-  const [combatTraceEntries, setCombatTraceEntries] = useState<CombatTraceEntry[]>([]);
+  const { combatTraceEntries, appendCombatTrace, clearCombatTrace } = useCombatTrace();
   const [deletingCharacterId, setDeletingCharacterId] = useState("");
   const [exportingCharacterId, setExportingCharacterId] = useState("");
   const [generatingPortraitId, setGeneratingPortraitId] = useState("");
@@ -475,12 +581,46 @@ export default function CampaignPage() {
   } | null>(null);
   const [pendingReactionSince, setPendingReactionSince] = useState<string | null>(null);
   const [reactionTicker, setReactionTicker] = useState(0);
+  const [combatMapTemplate, setCombatMapTemplate] = useState<CombatMapTemplateView | null>(null);
+  const [isLoadingCombatMapTemplate, setIsLoadingCombatMapTemplate] = useState(false);
+  const [areCombatTokenImagesReady, setAreCombatTokenImagesReady] = useState(false);
+  const [loadedCombatTokenImageCount, setLoadedCombatTokenImageCount] = useState(0);
+  const [awaitingCombatRoundStart, setAwaitingCombatRoundStart] = useState(false);
+  const [combatMapZoomPercent, setCombatMapZoomPercent] = useState(100);
+  const [combatMapTokenScalePercent, setCombatMapTokenScalePercent] = useState(150);
+  const [showCombatGrid, setShowCombatGrid] = useState(false);
+  const [showCombatBlockedTiles, setShowCombatBlockedTiles] = useState(false);
+  const [showCombatTokenLabels, setShowCombatTokenLabels] = useState(false);
+  const [showCombatTokenBadges, setShowCombatTokenBadges] = useState(false);
+  const [showCombatGridTelemetry, setShowCombatGridTelemetry] = useState(false);
+  const [hoveredCombatTargetRef, setHoveredCombatTargetRef] = useState<string | null>(null);
+  const [selectedMovementActorRef, setSelectedMovementActorRef] = useState<string | null>(null);
+  const [pendingCombatMoveDestination, setPendingCombatMoveDestination] = useState<{
+    x: number;
+    y: number;
+  } | null>(null);
+  const [committedCombatMove, setCommittedCombatMove] = useState<{
+    actorRef: string;
+    origin: { x: number; y: number };
+    destination: { x: number; y: number };
+  } | null>(null);
+  const [combatMapPanOffset, setCombatMapPanOffset] = useState({ x: 0, y: 0 });
+  const [isCombatMapDragging, setIsCombatMapDragging] = useState(false);
+  const combatMapDragStartRef = useRef<{
+    mouseX: number;
+    mouseY: number;
+    panX: number;
+    panY: number;
+  } | null>(null);
   const [sceneImageDraft, setSceneImageDraft] = useState({
     sceneTitle: "",
     place: "",
   });
   const [confirmationState, setConfirmationState] = useState<ConfirmationState | null>(null);
   const [debugSnapshot, setDebugSnapshot] = useState<DebugSnapshot>(null);
+  const [encounterIntentQuick, setEncounterIntentQuick] = useState<
+    "easy" | "standard" | "hard"
+  >("standard");
   const worldMapViewerScrollRef = useRef<HTMLDivElement | null>(null);
   const worldMapViewerDragStateRef = useRef<{
     startX: number;
@@ -525,6 +665,13 @@ export default function CampaignPage() {
       setDebugStateLoggingEnabled(false);
     }
   }, []);
+
+  useEffect(() => {
+    const nextIntent = debugBootstrapState?.hiddenView.combat_generation.encounterIntent;
+    if (nextIntent === "easy" || nextIntent === "standard" || nextIntent === "hard") {
+      setEncounterIntentQuick(nextIntent);
+    }
+  }, [debugBootstrapState]);
 
   useEffect(() => {
     const container = chatScrollContainerRef.current;
@@ -621,6 +768,39 @@ export default function CampaignPage() {
     }
 
     loadCampaign();
+  }, [campaignId]);
+
+  useEffect(() => {
+    if (!campaignId) {
+      return;
+    }
+
+    try {
+      const storedScale = window.localStorage.getItem(
+        `combat-map-token-scale:${campaignId}`,
+      );
+      const storedTelemetry = window.localStorage.getItem(
+        `combat-map-grid-telemetry:${campaignId}`,
+      );
+      if (storedTelemetry === "true" || storedTelemetry === "false") {
+        setShowCombatGridTelemetry(storedTelemetry === "true");
+      } else {
+        setShowCombatGridTelemetry(false);
+      }
+      if (!storedScale) {
+        setCombatMapTokenScalePercent(150);
+        return;
+      }
+      const parsed = Number.parseInt(storedScale, 10);
+      if (Number.isFinite(parsed)) {
+        setCombatMapTokenScalePercent(Math.max(50, Math.min(250, parsed)));
+      } else {
+        setCombatMapTokenScalePercent(150);
+      }
+    } catch {
+      setCombatMapTokenScalePercent(150);
+      setShowCombatGridTelemetry(false);
+    }
   }, [campaignId]);
 
   useEffect(() => {
@@ -876,6 +1056,71 @@ export default function CampaignPage() {
   const combatState = campaign?.combatStateJson ?? DEFAULT_COMBAT_STATE;
   const combatActive = combatState.combatActive && combatState.roster.length > 0;
   const engineCombatUiLocked = engineCombatModeEnabled && combatActive;
+  const { combatCheckpointStatusText, persistCombatCheckpointNow, queueCombatCheckpointPersist } =
+    useCombatCheckpointPersistence<CampaignCharacter>({
+      campaignId,
+      ruleset: campaign?.ruleset,
+      debugStateLoggingEnabled,
+      combatActive,
+      combatRound: combatState.round,
+      appendCombatTrace,
+    });
+  const combatEnemyTotal = Math.max(
+    0,
+    typeof combatState.encounterEnemyTotal === "number" &&
+      Number.isFinite(combatState.encounterEnemyTotal)
+      ? Math.trunc(combatState.encounterEnemyTotal)
+      : combatState.roster.filter((entry) => entry.type === "enemy").length,
+  );
+  const combatEnemyRemaining = Math.max(
+    0,
+    combatState.roster.filter(
+      (entry) => entry.type === "enemy" && !isCombatantDefeated(entry),
+    ).length,
+  );
+  const combatEncounterAdjustedXp =
+    typeof combatState.encounterAdjustedXp === "number" &&
+    Number.isFinite(combatState.encounterAdjustedXp)
+      ? Math.max(0, Math.trunc(combatState.encounterAdjustedXp))
+      : 0;
+  const combatEncounterBaseXp =
+    typeof combatState.encounterTotalXp === "number" &&
+    Number.isFinite(combatState.encounterTotalXp)
+      ? Math.max(0, Math.trunc(combatState.encounterTotalXp))
+      : 0;
+  const combatEncounterDifficulty =
+    typeof combatState.encounterDifficulty === "string" &&
+    combatState.encounterDifficulty.trim()
+      ? combatState.encounterDifficulty.trim()
+      : "Unknown";
+  const combatEncounterMultiplier =
+    combatEncounterBaseXp > 0 && combatEncounterAdjustedXp > 0
+      ? Math.max(1, combatEncounterAdjustedXp / combatEncounterBaseXp)
+      : 1;
+  const combatEncounterThresholdEasy =
+    typeof combatState.encounterThresholdEasy === "number" &&
+    Number.isFinite(combatState.encounterThresholdEasy)
+      ? Math.max(0, Math.trunc(combatState.encounterThresholdEasy))
+      : 0;
+  const combatEncounterThresholdMedium =
+    typeof combatState.encounterThresholdMedium === "number" &&
+    Number.isFinite(combatState.encounterThresholdMedium)
+      ? Math.max(0, Math.trunc(combatState.encounterThresholdMedium))
+      : 0;
+  const combatEncounterThresholdHard =
+    typeof combatState.encounterThresholdHard === "number" &&
+    Number.isFinite(combatState.encounterThresholdHard)
+      ? Math.max(0, Math.trunc(combatState.encounterThresholdHard))
+      : 0;
+  const combatEncounterThresholdDeadly =
+    typeof combatState.encounterThresholdDeadly === "number" &&
+    Number.isFinite(combatState.encounterThresholdDeadly)
+      ? Math.max(0, Math.trunc(combatState.encounterThresholdDeadly))
+      : 0;
+  const combatEncounterHeaderText =
+    combatEncounterAdjustedXp > 0
+      ? `${combatEncounterAdjustedXp.toLocaleString()} XP (${combatEncounterDifficulty}) ${combatEnemyRemaining}/${combatEnemyTotal} Enemies`
+      : `${combatEnemyRemaining}/${combatEnemyTotal} Enemies`;
   const initiativeOrderedCombatRoster = getInitiativeOrderedRoster(combatState);
   const companionColorMap = buildCompanionColorMap(companionCharacters);
   const needsCharacterGeneration = !mainCharacter;
@@ -895,7 +1140,449 @@ export default function CampaignPage() {
   const bootstrapVisibleClocks = bootstrapPublic?.clocks ?? [];
   const bootstrapRevealedClues = bootstrapPublic?.clues ?? [];
   const bootstrapExpansionEvents = bootstrapPublic?.expansion_events ?? [];
+  const characterMapById = new Map(
+    (campaign?.characters ?? []).map((character) => [character.id, character]),
+  );
+  const characterMapByName = new Map(
+    (campaign?.characters ?? []).map((character) => [
+      normalizeCharacterLookupName(character.name),
+      character,
+    ]),
+  );
   const sceneSummary = buildSceneSummary(campaign, messages);
+  const combatActiveEntry =
+    combatState.roster.find((entry) => entry.active) ??
+    combatState.roster[combatState.turnIndex] ??
+    null;
+  const activeCombatActorRef = combatActiveEntry
+    ? (combatActiveEntry.id ?? combatActiveEntry.name)
+    : null;
+  const movementSelectionEnabled =
+    combatActiveEntry?.type === "character" &&
+    Boolean(activeCombatActorRef) &&
+    selectedMovementActorRef === activeCombatActorRef;
+  const activeCombatCharacter =
+    combatActiveEntry &&
+    combatActiveEntry.type === "character"
+      ? (combatActiveEntry.id
+          ? characterMapById.get(combatActiveEntry.id)
+          : undefined) ??
+        characterMapByName.get(normalizeCharacterLookupName(combatActiveEntry.name)) ??
+        null
+      : null;
+  const activeCombatGridPosition = useMemo(() => {
+    if (
+      !combatActiveEntry ||
+      typeof combatActiveEntry.gridX !== "number" ||
+      !Number.isFinite(combatActiveEntry.gridX) ||
+      typeof combatActiveEntry.gridY !== "number" ||
+      !Number.isFinite(combatActiveEntry.gridY)
+    ) {
+      return null;
+    }
+    return { x: combatActiveEntry.gridX, y: combatActiveEntry.gridY };
+  }, [combatActiveEntry]);
+  const activeCombatSpeedTiles = getCombatMovementTilesPerMove(
+    campaignRuleset,
+    activeCombatCharacter?.sheetJson ?? null,
+  );
+  const pendingCombatMoveDistance =
+    pendingCombatMoveDestination && activeCombatGridPosition
+      ? getGridTileDistance(activeCombatGridPosition, pendingCombatMoveDestination)
+      : 0;
+  const pendingCombatMoveWithinNormal =
+    !pendingCombatMoveDestination ||
+    !activeCombatGridPosition ||
+    pendingCombatMoveDistance <= activeCombatSpeedTiles;
+  const pendingCombatMoveWithinDash =
+    !pendingCombatMoveDestination ||
+    !activeCombatGridPosition ||
+    pendingCombatMoveDistance <= activeCombatSpeedTiles * 2;
+  const combatMapTokens = useMemo(() => {
+    if (!engineCombatUiLocked) {
+      return [] as CombatRosterEntry[];
+    }
+    return combatState.roster.filter(
+      (entry) =>
+        typeof entry.gridX === "number" &&
+        Number.isFinite(entry.gridX) &&
+        typeof entry.gridY === "number" &&
+        Number.isFinite(entry.gridY),
+    );
+  }, [combatState.roster, engineCombatUiLocked]);
+  const combatMapTokenImageSources = useMemo(() => {
+    if (!engineCombatUiLocked) {
+      return [] as string[];
+    }
+    const uniqueSources = new Set<string>();
+    for (const entry of combatMapTokens) {
+      const source = getCombatTokenImageSource(entry);
+      if (typeof source === "string" && source.trim().length > 0) {
+        uniqueSources.add(source.trim());
+      }
+    }
+    return Array.from(uniqueSources);
+  }, [combatMapTokens, engineCombatUiLocked]);
+  const showCombatTokenLoadingOverlay =
+    engineCombatUiLocked &&
+    Boolean(combatMapTemplate) &&
+    !isLoadingCombatMapTemplate &&
+    combatMapTokenImageSources.length > 0 &&
+    !areCombatTokenImagesReady;
+  const combatMapBlockedSet = useMemo(
+    () =>
+      new Set(
+        normalizeTileCoordinatesForDisplay(combatMapTemplate?.blockedTilesJson).map(
+          ([x, y]) => `${x},${y}`,
+        ),
+      ),
+    [combatMapTemplate?.blockedTilesJson],
+  );
+  const combatMapOccupiedSet = useMemo(() => {
+    const occupied = new Set<string>();
+    for (const entry of combatMapTokens) {
+      for (const key of getCombatantOccupiedTileKeys(entry)) {
+        occupied.add(key);
+      }
+    }
+    return occupied;
+  }, [combatMapTokens]);
+  const { chooseAutoCombatTarget, buildAutoEnemyTurnPlan } = useAutoEnemyPlanner({
+    ruleset: campaign?.ruleset ?? "",
+    mainCharacter: mainCharacter
+      ? {
+          id: mainCharacter.id,
+          name: mainCharacter.name,
+        }
+      : null,
+    combatMapTemplate,
+    combatMapBlockedSet,
+    getMinimumTileDistanceBetweenCombatants,
+    getCombatantFootprintCols,
+    getCombatantFootprintRows,
+    getCombatantOccupiedTileKeys,
+    hasBlockedTilesOnLineOfSightClient,
+    getCombatMovementTilesPerMove,
+    isCombatHpDepleted,
+    normalizeCombatLookup,
+  });
+  const combatMovementRangeOverlay = useMemo(() => {
+    if (
+      !engineCombatUiLocked ||
+      !combatActiveEntry ||
+      combatActiveEntry.type !== "character" ||
+      !movementSelectionEnabled ||
+      !activeCombatGridPosition ||
+      !combatMapTemplate
+    ) {
+      return {
+        normal: new Set<string>(),
+        dashOnly: new Set<string>(),
+        origin: "",
+      };
+    }
+    const normal = new Set<string>();
+    const dashOnly = new Set<string>();
+    const origin = `${activeCombatGridPosition.x},${activeCombatGridPosition.y}`;
+    const activeOccupied = new Set(getCombatantOccupiedTileKeys(combatActiveEntry));
+    const normalRange = Math.max(1, activeCombatSpeedTiles);
+    const dashRange = Math.max(normalRange, normalRange * 2);
+    const maxCols = Math.max(1, combatMapTemplate.gridCols);
+    const maxRows = Math.max(1, combatMapTemplate.gridRows);
+
+    for (let y = 0; y < maxRows; y += 1) {
+      for (let x = 0; x < maxCols; x += 1) {
+        const key = `${x},${y}`;
+        if (key === origin) {
+          continue;
+        }
+        const destinationOccupied = getCombatantOccupiedTileKeys({
+          ...combatActiveEntry,
+          gridX: x,
+          gridY: y,
+        });
+        const blockedByDestination = destinationOccupied.some(
+          (tileKey) => combatMapBlockedSet.has(tileKey) && !activeOccupied.has(tileKey),
+        );
+        if (blockedByDestination) {
+          continue;
+        }
+        const occupiedByOther = destinationOccupied.some(
+          (tileKey) => combatMapOccupiedSet.has(tileKey) && !activeOccupied.has(tileKey),
+        );
+        if (occupiedByOther) {
+          continue;
+        }
+        const distance = getGridTileDistance(activeCombatGridPosition, { x, y });
+        if (distance <= normalRange) {
+          normal.add(key);
+        } else if (distance <= dashRange) {
+          dashOnly.add(key);
+        }
+      }
+    }
+
+    return { normal, dashOnly, origin };
+  }, [
+    activeCombatGridPosition,
+    activeCombatSpeedTiles,
+    combatActiveEntry,
+    combatMapBlockedSet,
+    combatMapOccupiedSet,
+    combatMapTemplate,
+    engineCombatUiLocked,
+    movementSelectionEnabled,
+  ]);
+  const compactCombatLogLines = useMemo(() => {
+    if (combatEngineLogEntries.length > 0) {
+      return combatEngineLogEntries.slice(-8).map((entry) => entry.text);
+    }
+    return messages.slice(-6).map((message) => {
+      const baseContent = message.role === "gm" ? stripVisibleSceneMetadata(message.content) : message.content;
+      const singleLine = decodeEscapedNewlines(baseContent).replace(/\s+/g, " ").trim();
+      return `${message.speakerName}: ${singleLine.slice(0, 180)}${singleLine.length > 180 ? "..." : ""}`;
+    });
+  }, [combatEngineLogEntries, messages]);
+
+  useEffect(() => {
+    if (!engineCombatUiLocked) {
+      setPendingCombatMoveDestination(null);
+      setSelectedMovementActorRef(null);
+      return;
+    }
+    if (!activeCombatActorRef || combatActiveEntry?.type !== "character") {
+      setSelectedMovementActorRef(null);
+      return;
+    }
+    setSelectedMovementActorRef(activeCombatActorRef);
+  }, [activeCombatActorRef, combatActiveEntry?.type, engineCombatUiLocked]);
+
+  useEffect(() => {
+    if (!engineCombatUiLocked) {
+      setPendingCombatMoveDestination(null);
+      setCommittedCombatMove(null);
+      return;
+    }
+    const activeEntry =
+      combatState.roster.find((entry) => entry.active) ??
+      combatState.roster[combatState.turnIndex] ??
+      null;
+    if (
+      !activeEntry ||
+      typeof activeEntry.gridX !== "number" ||
+      typeof activeEntry.gridY !== "number" ||
+      !Number.isFinite(activeEntry.gridX) ||
+      !Number.isFinite(activeEntry.gridY)
+    ) {
+      setPendingCombatMoveDestination(null);
+      return;
+    }
+    setPendingCombatMoveDestination((current) => {
+      if (!current) {
+        return current;
+      }
+      if (current.x === activeEntry.gridX && current.y === activeEntry.gridY) {
+        return null;
+      }
+      return current;
+    });
+  }, [combatState.roster, combatState.turnIndex, engineCombatUiLocked]);
+  useEffect(() => {
+    if (!committedCombatMove) {
+      return;
+    }
+    if (!engineCombatUiLocked || !combatActiveEntry) {
+      setCommittedCombatMove(null);
+      return;
+    }
+    const activeRef = combatActiveEntry.id ?? combatActiveEntry.name;
+    if (activeRef !== committedCombatMove.actorRef) {
+      setCommittedCombatMove(null);
+    }
+  }, [committedCombatMove, combatActiveEntry, engineCombatUiLocked]);
+
+  useEffect(() => {
+    if (!engineCombatUiLocked || !campaign?.ruleset) {
+      setCombatMapTemplate(null);
+      return;
+    }
+    let cancelled = false;
+    async function loadCombatMapTemplate() {
+      setIsLoadingCombatMapTemplate(true);
+      try {
+        const explicitTemplateId =
+          typeof combatState.mapTemplateId === "string" && combatState.mapTemplateId.trim()
+            ? combatState.mapTemplateId.trim()
+            : "";
+        let selectedTemplate: CombatMapTemplateView | null = null;
+
+        if (explicitTemplateId) {
+          const explicitRes = await fetch(`/api/admin/battle-maps/${explicitTemplateId}`, {
+            cache: "no-store",
+          });
+          const explicitData = (await explicitRes.json()) as {
+            template?: CombatMapTemplateView;
+          };
+          if (
+            explicitRes.ok &&
+            explicitData.template &&
+            typeof explicitData.template.id === "string"
+          ) {
+            selectedTemplate = explicitData.template;
+          }
+        }
+
+        if (!selectedTemplate) {
+        const inferredLocationKey = inferClientBattleMapLocationKey({
+          ruleset: campaign.ruleset,
+          sceneLocation: sceneSummary.location,
+          sceneTitle: sceneSummary.sceneTitle,
+        });
+        const preferredParams = new URLSearchParams();
+        preferredParams.set("ruleset", campaign.ruleset);
+        if (inferredLocationKey) {
+          preferredParams.set("locationKey", inferredLocationKey);
+        }
+        preferredParams.set("limit", "1");
+        const preferredRes = await fetch(`/api/admin/battle-maps?${preferredParams.toString()}`, {
+          cache: "no-store",
+        });
+        const preferredData = (await preferredRes.json()) as {
+          templates?: CombatMapTemplateView[];
+        };
+          selectedTemplate =
+            preferredRes.ok &&
+            Array.isArray(preferredData.templates) &&
+            preferredData.templates.length > 0
+              ? preferredData.templates[0]
+              : null;
+
+          if (!selectedTemplate) {
+          const fallbackParams = new URLSearchParams();
+          fallbackParams.set("ruleset", campaign.ruleset);
+          fallbackParams.set("limit", "1");
+          const fallbackRes = await fetch(`/api/admin/battle-maps?${fallbackParams.toString()}`, {
+            cache: "no-store",
+          });
+          const fallbackData = (await fallbackRes.json()) as {
+            templates?: CombatMapTemplateView[];
+          };
+            selectedTemplate =
+              fallbackRes.ok &&
+              Array.isArray(fallbackData.templates) &&
+              fallbackData.templates.length > 0
+                ? fallbackData.templates[0]
+                : null;
+          }
+        }
+
+        if (!cancelled) {
+          setCombatMapTemplate(selectedTemplate);
+        }
+      } catch {
+        if (!cancelled) {
+          setCombatMapTemplate(null);
+        }
+      } finally {
+        if (!cancelled) {
+          setIsLoadingCombatMapTemplate(false);
+        }
+      }
+    }
+    void loadCombatMapTemplate();
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    combatState.mapTemplateId,
+    campaign?.ruleset,
+    engineCombatUiLocked,
+    sceneSummary.location,
+    sceneSummary.sceneTitle,
+  ]);
+
+  useEffect(() => {
+    if (!engineCombatUiLocked) {
+      return;
+    }
+    setCombatMapZoomPercent(100);
+    setCombatMapPanOffset({ x: 0, y: 0 });
+  }, [combatMapTemplate?.id, engineCombatUiLocked]);
+  useEffect(() => {
+    if (
+      !engineCombatUiLocked ||
+      !combatMapTemplate ||
+      isLoadingCombatMapTemplate
+    ) {
+      setAreCombatTokenImagesReady(false);
+      setLoadedCombatTokenImageCount(0);
+      return;
+    }
+    if (combatMapTokenImageSources.length === 0) {
+      setAreCombatTokenImagesReady(true);
+      setLoadedCombatTokenImageCount(0);
+      return;
+    }
+
+    let cancelled = false;
+    let loadedCount = 0;
+    setAreCombatTokenImagesReady(false);
+    setLoadedCombatTokenImageCount(0);
+
+    const images = combatMapTokenImageSources.map((source) => {
+      const image = new window.Image();
+      const markLoaded = () => {
+        image.onload = null;
+        image.onerror = null;
+        loadedCount += 1;
+        if (!cancelled) {
+          setLoadedCombatTokenImageCount(loadedCount);
+          if (loadedCount >= combatMapTokenImageSources.length) {
+            setAreCombatTokenImagesReady(true);
+          }
+        }
+      };
+      image.onload = markLoaded;
+      image.onerror = markLoaded;
+      image.src = source;
+      if (image.complete) {
+        markLoaded();
+      }
+      return image;
+    });
+
+    return () => {
+      cancelled = true;
+      for (const image of images) {
+        image.onload = null;
+        image.onerror = null;
+      }
+    };
+  }, [
+    combatMapTemplate,
+    combatMapTokenImageSources,
+    engineCombatUiLocked,
+    isLoadingCombatMapTemplate,
+  ]);
+  useEffect(() => {
+    if (!awaitingCombatRoundStart) {
+      return;
+    }
+    if (!engineCombatUiLocked || !combatActive || combatState.round !== 1) {
+      setAwaitingCombatRoundStart(false);
+      return;
+    }
+    if (combatActiveEntry?.type !== "enemy") {
+      setAwaitingCombatRoundStart(false);
+    }
+  }, [
+    awaitingCombatRoundStart,
+    combatActive,
+    combatActiveEntry?.type,
+    combatState.round,
+    engineCombatUiLocked,
+  ]);
+
   const sceneImageHistory = campaign?.sceneImageHistoryJson ?? [];
   const filteredSceneImageHistory = sceneImageHistory.filter((image) => {
     if (sceneImageSavedTypeFilter === "all") {
@@ -931,28 +1618,6 @@ export default function CampaignPage() {
   const selectedWorldMapPins = selectedWorldMap?.pins ?? [];
   const selectedWorldMapPin =
     selectedWorldMapPins.find((pin) => pin.id === selectedWorldMapPinId) ?? null;
-  const characterMapById = new Map(
-    (campaign?.characters ?? []).map((character) => [character.id, character]),
-  );
-  const characterMapByName = new Map(
-    (campaign?.characters ?? []).map((character) => [
-      normalizeCharacterLookupName(character.name),
-      character,
-    ]),
-  );
-  const combatActiveEntry =
-    combatState.roster.find((entry) => entry.active) ??
-    combatState.roster[combatState.turnIndex] ??
-    null;
-  const activeCombatCharacter =
-    combatActiveEntry &&
-    combatActiveEntry.type === "character"
-      ? (combatActiveEntry.id
-          ? characterMapById.get(combatActiveEntry.id)
-          : undefined) ??
-        characterMapByName.get(normalizeCharacterLookupName(combatActiveEntry.name)) ??
-        null
-      : null;
   const combatActionPresets = useMemo<AttackActionPreset[]>(() => {
     if (!activeCombatCharacter) {
       return [
@@ -1023,6 +1688,199 @@ export default function CampaignPage() {
         (entry.id || entry.name) !== (combatActiveEntry.id || combatActiveEntry.name),
     );
   }, [combatActiveEntry, combatState.roster]);
+  const combatValidTargetRefSet = useMemo(() => {
+    const valid = new Set<string>();
+    if (!combatActiveEntry) {
+      return valid;
+    }
+    if (combatActionKind !== "attack" && combatActionKind !== "cast-spell") {
+      for (const entry of combatLegalTargets) {
+        valid.add(entry.id ?? entry.name);
+      }
+      return valid;
+    }
+    const attackRangeMode =
+      combatActionKind === "attack" && selectedCombatAttackPreset
+        ? inferAttackRangeModeFromPreset(selectedCombatAttackPreset)
+        : "ranged";
+    for (const entry of combatLegalTargets) {
+      const targetRef = entry.id ?? entry.name;
+      if (combatActionKind === "attack" && attackRangeMode === "melee") {
+        const minimumDistance = getMinimumTileDistanceBetweenCombatants(
+          combatActiveEntry,
+          entry,
+        );
+        if (minimumDistance <= 1) {
+          valid.add(targetRef);
+        }
+        continue;
+      }
+      const blocked = hasBlockedTilesOnLineOfSightClient({
+        actor: combatActiveEntry,
+        target: entry,
+        blockedTileSet: combatMapBlockedSet,
+      });
+      if (!blocked) {
+        valid.add(targetRef);
+      }
+    }
+    return valid;
+  }, [
+    combatActionKind,
+    combatActiveEntry,
+    combatLegalTargets,
+    combatMapBlockedSet,
+    selectedCombatAttackPreset,
+  ]);
+  const hoveredCombatTarget =
+    combatLegalTargets.find((entry) => (entry.id ?? entry.name) === hoveredCombatTargetRef) ?? null;
+  const hoveredCombatTargetRefResolved = hoveredCombatTarget
+    ? (hoveredCombatTarget.id ?? hoveredCombatTarget.name)
+    : "";
+  const selectedCombatTargetForLine =
+    combatLegalTargets.find((entry) => (entry.id ?? entry.name) === combatActionTargetRef) ?? null;
+  const hoverAttackRangeMode: AttackRangeMode = useMemo(() => {
+    if (combatActionKind === "cast-spell") {
+      return "ranged";
+    }
+    if (combatActionKind === "attack" && selectedCombatAttackPreset) {
+      return inferAttackRangeModeFromPreset(selectedCombatAttackPreset);
+    }
+    return "ranged";
+  }, [combatActionKind, selectedCombatAttackPreset]);
+  const hoveredTargetLine = useMemo(() => {
+    if (
+      !engineCombatUiLocked ||
+      !combatMapTemplate ||
+      !combatActiveEntry ||
+      !hoveredCombatTarget ||
+      (combatActionKind !== "attack" && combatActionKind !== "cast-spell") ||
+      hoverAttackRangeMode !== "ranged"
+    ) {
+      return null;
+    }
+    const actorCenter = getCombatantCenterPx(combatActiveEntry);
+    const targetCenter = getCombatantCenterPx(hoveredCombatTarget);
+    if (!actorCenter || !targetCenter) {
+      return null;
+    }
+    return {
+      x1: actorCenter.x,
+      y1: actorCenter.y,
+      x2: targetCenter.x,
+      y2: targetCenter.y,
+      blocked: hasBlockedTilesOnLineOfSightClient({
+        actor: combatActiveEntry,
+        target: hoveredCombatTarget,
+        blockedTileSet: combatMapBlockedSet,
+      }),
+    };
+  }, [
+    combatActionKind,
+    combatActiveEntry,
+    combatMapBlockedSet,
+    combatMapTemplate,
+    engineCombatUiLocked,
+    hoverAttackRangeMode,
+    hoveredCombatTarget,
+  ]);
+  const selectedTargetLine = useMemo(() => {
+    if (
+      !engineCombatUiLocked ||
+      !combatMapTemplate ||
+      !combatActiveEntry ||
+      !selectedCombatTargetForLine ||
+      (combatActionKind !== "attack" && combatActionKind !== "cast-spell") ||
+      hoverAttackRangeMode !== "ranged" ||
+      !combatValidTargetRefSet.has(combatActionTargetRef)
+    ) {
+      return null;
+    }
+    const actorCenter = getCombatantCenterPx(combatActiveEntry);
+    const targetCenter = getCombatantCenterPx(selectedCombatTargetForLine);
+    if (!actorCenter || !targetCenter) {
+      return null;
+    }
+    return {
+      x1: actorCenter.x,
+      y1: actorCenter.y,
+      x2: targetCenter.x,
+      y2: targetCenter.y,
+    };
+  }, [
+    combatActionKind,
+    combatActionTargetRef,
+    combatActiveEntry,
+    combatMapTemplate,
+    combatValidTargetRefSet,
+    engineCombatUiLocked,
+    hoverAttackRangeMode,
+    selectedCombatTargetForLine,
+  ]);
+  const hoveredMeleeIndicator = useMemo(() => {
+    if (
+      !engineCombatUiLocked ||
+      !combatMapTemplate ||
+      !combatActiveEntry ||
+      !hoveredCombatTarget ||
+      combatActionKind !== "attack" ||
+      hoverAttackRangeMode !== "melee"
+    ) {
+      return null;
+    }
+    if (!combatValidTargetRefSet.has(hoveredCombatTargetRefResolved)) {
+      return null;
+    }
+    const actorCenter = getCombatantCenterPx(combatActiveEntry);
+    const targetCenter = getCombatantCenterPx(hoveredCombatTarget);
+    if (!actorCenter || !targetCenter) {
+      return null;
+    }
+    return {
+      x: actorCenter.x + (targetCenter.x - actorCenter.x) * 0.6,
+      y: actorCenter.y + (targetCenter.y - actorCenter.y) * 0.6,
+    };
+  }, [
+    combatActionKind,
+    combatActiveEntry,
+    combatMapTemplate,
+    combatValidTargetRefSet,
+    engineCombatUiLocked,
+    hoverAttackRangeMode,
+    hoveredCombatTarget,
+    hoveredCombatTargetRefResolved,
+  ]);
+  const selectedMeleeIndicator = useMemo(() => {
+    if (
+      !engineCombatUiLocked ||
+      !combatMapTemplate ||
+      !combatActiveEntry ||
+      !selectedCombatTargetForLine ||
+      combatActionKind !== "attack" ||
+      hoverAttackRangeMode !== "melee" ||
+      !combatValidTargetRefSet.has(combatActionTargetRef)
+    ) {
+      return null;
+    }
+    const actorCenter = getCombatantCenterPx(combatActiveEntry);
+    const targetCenter = getCombatantCenterPx(selectedCombatTargetForLine);
+    if (!actorCenter || !targetCenter) {
+      return null;
+    }
+    return {
+      x: actorCenter.x + (targetCenter.x - actorCenter.x) * 0.6,
+      y: actorCenter.y + (targetCenter.y - actorCenter.y) * 0.6,
+    };
+  }, [
+    combatActionKind,
+    combatActionTargetRef,
+    combatActiveEntry,
+    combatMapTemplate,
+    combatValidTargetRefSet,
+    engineCombatUiLocked,
+    hoverAttackRangeMode,
+    selectedCombatTargetForLine,
+  ]);
   const isDeadlandsRuleset = campaignRuleset.trim().toLowerCase().includes("deadlands");
   const nextCombatEntry = useMemo(() => {
     if (!combatActive || combatState.roster.length === 0) {
@@ -1089,11 +1947,25 @@ export default function CampaignPage() {
     if (!combatActiveEntry) {
       return "No active combatant turn found.";
     }
+    if (
+      awaitingCombatRoundStart &&
+      combatState.round === 1 &&
+      combatActiveEntry.type === "enemy"
+    ) {
+      return "Press Start to run enemy opening turns.";
+    }
     if ((combatActionKind === "attack" || combatActionKind === "cast-spell") && combatLegalTargets.length === 0) {
       return "No valid targets remain.";
     }
     if ((combatActionKind === "attack" || combatActionKind === "cast-spell") && !combatActionTargetRef) {
       return "Select a target first.";
+    }
+    if (
+      (combatActionKind === "attack" || combatActionKind === "cast-spell") &&
+      combatActionTargetRef &&
+      !combatValidTargetRefSet.has(combatActionTargetRef)
+    ) {
+      return "Selected target is invalid for this action.";
     }
     if (combatActionKind === "cast-spell" && (!selectedCombatAttackPreset || selectedCombatAttackPreset.category !== "spell")) {
       return "Select a spell.";
@@ -1107,12 +1979,15 @@ export default function CampaignPage() {
     combatActionKind,
     combatActionTargetRef,
     combatActiveEntry,
+    combatState.round,
     combatLegalTargets.length,
+    combatValidTargetRefSet,
     combatSpellSlotLevel,
     isAutoResolvingCombat,
     isSubmittingCombatAction,
     loading,
     pendingReaction,
+    awaitingCombatRoundStart,
     selectedCombatAttackPreset,
     selectedCombatSpellConsumesSlot,
   ]);
@@ -1122,6 +1997,11 @@ export default function CampaignPage() {
       ? Math.max(0, Math.floor((Date.now() - new Date(pendingReactionSince).getTime()) / 1000))
       : 0;
   })();
+  const showCombatRoundStartButton =
+    engineCombatUiLocked &&
+    awaitingCombatRoundStart &&
+    combatState.round === 1 &&
+    combatActiveEntry?.type === "enemy";
 
   useEffect(() => {
     if (!combatActive) {
@@ -1163,10 +2043,12 @@ export default function CampaignPage() {
 
   useEffect(() => {
     setCombatEngineLogEntries([]);
-    setCombatTraceEntries([]);
+    clearCombatTrace();
     setCombatActionTargetRef("");
     setPendingReaction(null);
-  }, [campaignId]);
+    setAwaitingCombatRoundStart(false);
+    setCommittedCombatMove(null);
+  }, [campaignId, clearCombatTrace]);
 
   useEffect(() => {
     if (pendingReaction) {
@@ -1220,15 +2102,13 @@ export default function CampaignPage() {
       return;
     }
 
-    const currentTargetStillValid = combatLegalTargets.some(
-      (entry) => (entry.id ?? entry.name) === combatActionTargetRef,
-    );
+    const currentTargetStillValid = combatValidTargetRefSet.has(combatActionTargetRef);
     if (currentTargetStillValid) {
       return;
     }
 
-    setCombatActionTargetRef(combatLegalTargets[0].id ?? combatLegalTargets[0].name);
-  }, [combatActionTargetRef, combatLegalTargets, engineCombatUiLocked]);
+    setCombatActionTargetRef("");
+  }, [combatActionTargetRef, combatLegalTargets.length, combatValidTargetRefSet, engineCombatUiLocked]);
 
   useEffect(() => {
     const hasKind = combatActionOptions.some((option) => option.kind === combatActionKind);
@@ -1245,14 +2125,17 @@ export default function CampaignPage() {
     if (combatActionKind !== "attack" && combatActionKind !== "cast-spell") {
       return;
     }
-    if (combatActionTargetRef) {
+    setCombatActionTargetRef("");
+  }, [combatActionKind, engineCombatUiLocked]);
+  useEffect(() => {
+    if (!engineCombatUiLocked) {
+      setHoveredCombatTargetRef(null);
       return;
     }
-    if (combatLegalTargets.length === 0) {
-      return;
+    if (combatActionKind !== "attack" && combatActionKind !== "cast-spell") {
+      setHoveredCombatTargetRef(null);
     }
-    setCombatActionTargetRef(combatLegalTargets[0].id ?? combatLegalTargets[0].name);
-  }, [combatActionKind, combatActionTargetRef, combatLegalTargets, engineCombatUiLocked]);
+  }, [combatActionKind, engineCombatUiLocked, combatState.turnIndex]);
 
   useEffect(() => {
     if (combatActionKind !== "attack" && combatActionKind !== "cast-spell") {
@@ -1339,37 +2222,6 @@ export default function CampaignPage() {
     return normalizeCombatLookup(entry.name) === normalizeCombatLookup(mainCharacter.name);
   }
 
-  function getCombatLegalTargetsForActor(state: CombatState, actor: CombatRosterEntry) {
-    const targetType = actor.type === "enemy" ? "character" : "enemy";
-    return state.roster.filter(
-      (entry) =>
-        entry.type === targetType &&
-        !isCombatHpDepleted(entry.hp) &&
-        (entry.id ?? entry.name) !== (actor.id ?? actor.name),
-    );
-  }
-
-  function chooseAutoCombatTarget(state: CombatState, actor: CombatRosterEntry) {
-    const legalTargets = getCombatLegalTargetsForActor(state, actor);
-    if (legalTargets.length === 0) {
-      return null;
-    }
-
-    if (actor.type === "enemy" && mainCharacter) {
-      const preferred =
-        legalTargets.find((entry) => entry.id && entry.id === mainCharacter.id) ??
-        legalTargets.find(
-          (entry) =>
-            normalizeCombatLookup(entry.name) === normalizeCombatLookup(mainCharacter.name),
-        );
-      if (preferred) {
-        return preferred;
-      }
-    }
-
-    return legalTargets[0];
-  }
-
   function getCombatRosterEntryByRef(
     state: CombatState,
     ref: string | undefined,
@@ -1424,24 +2276,6 @@ export default function CampaignPage() {
     return `Reaction refreshed: ${nextActive.name}.`;
   }
 
-  function appendCombatTrace(phase: string, payload: unknown) {
-    if (!payload || (typeof payload === "object" && payload !== null && Object.keys(payload as Record<string, unknown>).length === 0)) {
-      return;
-    }
-    setCombatTraceEntries((current) => {
-      const next = [
-        ...current,
-        {
-          id: crypto.randomUUID(),
-          timestamp: new Date().toISOString(),
-          phase,
-          payload,
-        },
-      ];
-      return next.length > 60 ? next.slice(next.length - 60) : next;
-    });
-  }
-
   function resolveEngineActionSpeaker(
     actorRef: string | undefined,
     fallbackName?: string,
@@ -1468,227 +2302,77 @@ export default function CampaignPage() {
     };
   }
 
-  async function runEngineAutoTurns(startState: CombatState) {
-    if (!campaignId || !engineCombatModeEnabled || !startState.combatActive) {
-      return startState;
+  const { runEngineAutoTurns } = useCombatAutoTurns({
+    campaignId,
+    engineCombatModeEnabled,
+    autoCompanionCombatEnabled,
+    debugStateLoggingEnabled,
+    mainCharacter: mainCharacter
+      ? {
+          id: mainCharacter.id,
+          name: mainCharacter.name,
+        }
+      : null,
+    combatMapBlockedSet,
+    characterMapById,
+    characterMapByName,
+    normalizeCharacterLookupName,
+    isMainCharacterCombatTurn,
+    isMainCharacterCombatEntry,
+    buildAutoEnemyTurnPlan,
+    chooseAutoCombatTarget,
+    chooseAutoEngineActionForCombatant,
+    findCombatTargetFromRef,
+    mergeCampaignCharacters,
+    resolveEngineActionSpeaker,
+    buildCombatEngineResolutionNarration,
+    getReactionRefreshLogLine,
+    appendCombatTrace,
+    queueCombatCheckpointPersist,
+    setIsAutoResolvingCombat,
+    setPendingReaction,
+    setCombatEngineLogEntries,
+    setCampaign,
+    setMessages,
+    setLastCombatResolution,
+  });
+
+  async function handleStartCombatRound() {
+    if (
+      !campaign ||
+      !campaignId ||
+      !awaitingCombatRoundStart ||
+      isSubmittingCombatAction ||
+      isAutoResolvingCombat
+    ) {
+      return;
     }
 
-    if (!mainCharacter) {
-      return startState;
+    const currentState = campaign.combatStateJson ?? DEFAULT_COMBAT_STATE;
+    if (!currentState.combatActive || currentState.round !== 1) {
+      setAwaitingCombatRoundStart(false);
+      return;
+    }
+    const activeEntry =
+      currentState.roster.find((entry) => entry.active) ??
+      currentState.roster[currentState.turnIndex] ??
+      null;
+    if (!activeEntry || activeEntry.type !== "enemy") {
+      setAwaitingCombatRoundStart(false);
+      return;
     }
 
-    setIsAutoResolvingCombat(true);
-
-    let workingState = startState;
-    let safetyCounter = 0;
-
+    setAwaitingCombatRoundStart(false);
+    setLoading(true);
     try {
-      while (
-        workingState.combatActive &&
-        workingState.roster.length > 0 &&
-        !isMainCharacterCombatTurn(workingState) &&
-        safetyCounter < 24
-      ) {
-        const activeEntry =
-          workingState.roster.find((entry) => entry.active) ??
-          workingState.roster[workingState.turnIndex] ??
-          null;
-        if (!activeEntry) {
-          break;
-        }
-        if (
-          activeEntry.type === "character" &&
-          !isMainCharacterCombatEntry(activeEntry) &&
-          !autoCompanionCombatEnabled
-        ) {
-          break;
-        }
-
-        const targetEntry = chooseAutoCombatTarget(workingState, activeEntry);
-        const autoAction = chooseAutoEngineActionForCombatant({
-          actorEntry: activeEntry,
-          actorCharacter:
-            (activeEntry.id ? characterMapById.get(activeEntry.id) : null) ??
-            characterMapByName.get(normalizeCharacterLookupName(activeEntry.name)) ??
-            null,
-          targetEntry,
-          ruleset: campaign?.ruleset ?? "",
-        });
-        if (!autoAction) {
-          break;
-        }
-
-        const actionSeedInput = crypto.randomUUID();
-        const basePayload = {
-          action: "submit",
-          kind: autoAction.kind,
-          actor: activeEntry.id ?? activeEntry.name,
-          target:
-            autoAction.kind === "attack" || autoAction.kind === "cast-spell"
-              ? targetEntry?.id ?? targetEntry?.name
-              : undefined,
-          attackBonus: autoAction.attackBonus,
-          damageDie: autoAction.damageDie,
-          damageBonus: autoAction.damageBonus,
-          spellName: autoAction.spellName,
-          spellSlot: autoAction.spellSlot,
-          seedInput: actionSeedInput,
-        };
-        const response = await fetch(`/api/campaigns/${campaignId}/combat`, {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Debug-State-Logging": debugStateLoggingEnabled ? "true" : "false",
-          },
-          body: JSON.stringify(basePayload),
-        });
-        let data = await response.json();
-        if (response.ok && data?.requiresReaction && data?.reactionPrompt) {
-          const prompt = data.reactionPrompt as {
-            targetRef?: string;
-            targetName?: string;
-            detail?: string;
-          };
-          const isMainReactionTarget =
-            Boolean(mainCharacter) &&
-            (String(prompt.targetRef ?? "").trim() === mainCharacter?.id ||
-              normalizeCombatLookup(String(prompt.targetName ?? "")) ===
-                normalizeCombatLookup(mainCharacter?.name ?? ""));
-          if (isMainReactionTarget) {
-            appendCombatTrace("auto-reaction-required", {
-              adapterDebug: "adapterDebug" in data ? data.adapterDebug : null,
-              reactionPrompt: data.reactionPrompt,
-              previewResolution: data.previewResolution ?? null,
-            });
-            setPendingReaction({
-              actorRef: String(basePayload.actor ?? ""),
-              targetRef: String(prompt.targetRef ?? basePayload.target ?? ""),
-              kind: basePayload.kind as CombatActionKind,
-              seedInput: actionSeedInput,
-              targetName: String(prompt.targetName ?? "Target"),
-              selectedAttackPresetId: autoAction.attackPresetId ?? "basic",
-              spellSlot: autoAction.spellSlot,
-              spellName: autoAction.spellName,
-              detail: typeof prompt.detail === "string" ? prompt.detail : undefined,
-            });
-            setCombatEngineLogEntries((current) => [
-              ...current,
-              {
-                id: crypto.randomUUID(),
-                text: `Reaction available: ${String(prompt.targetName ?? "Target")} can use Shield.`,
-              },
-            ]);
-            break;
-          }
-
-          const reactionResponse = await fetch(`/api/campaigns/${campaignId}/combat`, {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              "X-Debug-State-Logging": debugStateLoggingEnabled ? "true" : "false",
-            },
-            body: JSON.stringify({
-              ...basePayload,
-              reactionDecision: "decline",
-            }),
-          });
-          data = await reactionResponse.json();
-          if (reactionResponse.ok) {
-            appendCombatTrace("auto-reaction-decline", {
-              adapterDebug: "adapterDebug" in data ? data.adapterDebug : null,
-              resolution: data.resolution ?? null,
-            });
-          }
-          if (!reactionResponse.ok || !data.combatStateJson || !data.resolution) {
-            throw new Error(data.error ?? "Unable to auto-resolve reaction turn.");
-          }
-        }
-
-        if (!response.ok || !data.combatStateJson || !data.resolution) {
-          throw new Error(data.error ?? "Unable to auto-resolve combat turn.");
-        }
-
-        const nextState = data.combatStateJson as CombatState;
-        const typedResolution = data.resolution as Record<string, unknown>;
-        appendCombatTrace("auto-submit", {
-          adapterDebug: "adapterDebug" in data ? data.adapterDebug : null,
-          resolution: typedResolution,
-        });
-        const reactionRefreshLine = getReactionRefreshLogLine(workingState, nextState);
-
-        setCampaign((currentCampaign) =>
-          currentCampaign
-            ? {
-                ...currentCampaign,
-                combatStateJson: nextState,
-                characters: mergeCampaignCharacters(
-                  currentCampaign.characters,
-                  data.characters,
-                ),
-              }
-            : currentCampaign,
-        );
-        const speaker = resolveEngineActionSpeaker(
-          typeof typedResolution.actor === "string" ? typedResolution.actor : undefined,
-          activeEntry.name,
-        );
-        setMessages((prev) => [
-          ...prev,
-          {
-            speakerName: speaker.speakerName,
-            role: speaker.role,
-            content: buildCombatEngineResolutionNarration(typedResolution),
-            isEnemyNarration: speaker.isEnemyNarration,
-          },
-        ]);
-        setCombatEngineLogEntries((current) => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            text: `[Auto] ${buildCombatEngineResolutionNarration(typedResolution)}`,
-          },
-          ...(reactionRefreshLine
-            ? [
-                {
-                  id: crypto.randomUUID(),
-                  text: `[Auto] ${reactionRefreshLine}`,
-                },
-              ]
-            : []),
-          ...("adapterDebug" in data && data.adapterDebug
-            ? [
-                {
-                  id: crypto.randomUUID(),
-                  text: `[Adapter] ${String((data.adapterDebug as { profile?: string }).profile ?? "unknown")} (${String((data.adapterDebug as { ruleset?: string }).ruleset ?? "unknown ruleset")})`,
-                },
-              ]
-            : []),
-        ]);
-        setLastCombatResolution({
-          narration: buildCombatEngineResolutionNarration(typedResolution),
-          resolution: typedResolution,
-          phase: "auto",
-          createdAt: new Date().toISOString(),
-        });
-
-        workingState = nextState;
-        safetyCounter += 1;
-      }
-
-      if (safetyCounter >= 24) {
-        setCombatEngineLogEntries((current) => [
-          ...current,
-          {
-            id: crypto.randomUUID(),
-            text: "Auto-turn safety stop reached.",
-          },
-        ]);
-      }
+      const finalCombatState = await runEngineAutoTurns(currentState, {
+        ruleset: campaign.ruleset,
+        characters: campaign.characters,
+      });
+      await maybeAutoEndEngineCombatFromState(finalCombatState);
     } finally {
-      setIsAutoResolvingCombat(false);
+      setLoading(false);
     }
-
-    return workingState;
   }
 
   function handleCombatControlsKeyDown(event: ReactKeyboardEvent<HTMLFormElement>) {
@@ -1729,6 +2413,7 @@ export default function CampaignPage() {
       void handleCombatEngineSubmit({
         kind: combatActionKind,
         targetRef: combatActionTargetRef,
+        moveDestination: pendingCombatMoveDestination ?? undefined,
       });
     }
   }
@@ -1737,6 +2422,7 @@ export default function CampaignPage() {
     kind: CombatActionKind;
     targetRef?: string;
     userMessageContent?: string;
+    moveDestination?: { x: number; y: number };
   }) {
     if (!campaignId || !campaign || isSubmittingCombatAction) {
       return false;
@@ -1754,6 +2440,64 @@ export default function CampaignPage() {
     if (!activeEntry) {
       setError("Combat turn could not be determined.");
       return true;
+    }
+    const actorCharacter =
+      (activeEntry.id ? characterMapById.get(activeEntry.id) : null) ??
+      characterMapByName.get(normalizeCharacterLookupName(activeEntry.name)) ??
+      null;
+    const actorRef = activeEntry.id ?? activeEntry.name;
+    const stagedMoveForActor =
+      committedCombatMove && committedCombatMove.actorRef === actorRef
+        ? committedCombatMove
+        : null;
+    const effectiveMoveDestination = params.moveDestination ?? stagedMoveForActor?.destination;
+    if (effectiveMoveDestination) {
+      if (
+        typeof activeEntry.gridX !== "number" ||
+        typeof activeEntry.gridY !== "number" ||
+        !Number.isFinite(activeEntry.gridX) ||
+        !Number.isFinite(activeEntry.gridY)
+      ) {
+        setError("Active combatant does not have a grid position.");
+        return true;
+      }
+      const activeOccupied = new Set(getCombatantOccupiedTileKeys(activeEntry));
+      const destinationOccupied = getCombatantOccupiedTileKeys({
+        ...activeEntry,
+        gridX: effectiveMoveDestination.x,
+        gridY: effectiveMoveDestination.y,
+      });
+      const blockedByDestination = destinationOccupied.some(
+        (tileKey) => combatMapBlockedSet.has(tileKey) && !activeOccupied.has(tileKey),
+      );
+      if (blockedByDestination) {
+        setError("Destination tile is blocked.");
+        return true;
+      }
+      const occupiedByOther = destinationOccupied.some(
+        (tileKey) => combatMapOccupiedSet.has(tileKey) && !activeOccupied.has(tileKey),
+      );
+      if (occupiedByOther) {
+        setError("Destination tile is occupied.");
+        return true;
+      }
+      const moveDistance = getGridTileDistance(
+        { x: activeEntry.gridX, y: activeEntry.gridY },
+        effectiveMoveDestination,
+      );
+      const normalMoveTiles = getCombatMovementTilesPerMove(
+        campaign.ruleset,
+        actorCharacter?.sheetJson ?? null,
+      );
+      const maxMoveTiles = params.kind === "dash" ? normalMoveTiles * 2 : normalMoveTiles;
+      if (moveDistance > maxMoveTiles) {
+        if (params.kind !== "dash" && moveDistance <= normalMoveTiles * 2) {
+          setError(`Move is ${moveDistance} tiles. Use Dash for up to ${normalMoveTiles * 2} tiles.`);
+        } else {
+          setError(`Move is ${moveDistance} tiles, exceeds max ${maxMoveTiles} for this action.`);
+        }
+        return true;
+      }
     }
 
     const targetEntry =
@@ -1789,6 +2533,39 @@ export default function CampaignPage() {
       return true;
     }
 
+    const shouldApplyOptimisticMove =
+      Boolean(effectiveMoveDestination) &&
+      (params.kind === "disengage" || params.kind === "dash") &&
+      !stagedMoveForActor;
+    let appliedOptimisticMove = false;
+    const previousCombatState = combatState;
+    if (shouldApplyOptimisticMove && effectiveMoveDestination) {
+      setCampaign((currentCampaign) => {
+        if (!currentCampaign) {
+          return currentCampaign;
+        }
+        const currentCombatState = currentCampaign.combatStateJson ?? DEFAULT_COMBAT_STATE;
+        return {
+          ...currentCampaign,
+          combatStateJson: {
+            ...currentCombatState,
+            roster: currentCombatState.roster.map((entry) => {
+              const entryRef = entry.id ?? entry.name;
+              if (entryRef !== actorRef) {
+                return entry;
+              }
+              return {
+                ...entry,
+                gridX: effectiveMoveDestination.x,
+                gridY: effectiveMoveDestination.y,
+              };
+            }),
+          },
+        };
+      });
+      appliedOptimisticMove = true;
+    }
+
     setError("");
     setIsSubmittingCombatAction(true);
     setLoading(true);
@@ -1796,32 +2573,28 @@ export default function CampaignPage() {
 
     const defaultUserMessage =
       params.kind === "attack"
-        ? `Attack ${targetEntry?.name ?? "target"} with ${selectedAttackPreset?.label ?? "attack"}.`
+        ? `${effectiveMoveDestination ? `Move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}) then ` : ""}attack ${targetEntry?.name ?? "target"} with ${selectedAttackPreset?.label ?? "attack"}.`
         : params.kind === "cast-spell"
           ? isFireballAoeCast
-            ? `Cast ${selectedAttackPreset?.label ?? "Fireball"} on ${Math.max(1, fireballTargetRefs.length)} targets.`
-            : `Cast ${selectedAttackPreset?.label ?? "spell"} at ${targetEntry?.name ?? "target"}.`
+            ? `${effectiveMoveDestination ? `Move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}) then ` : ""}cast ${selectedAttackPreset?.label ?? "Fireball"} on ${Math.max(1, fireballTargetRefs.length)} targets.`
+            : `${effectiveMoveDestination ? `Move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}) then ` : ""}cast ${selectedAttackPreset?.label ?? "spell"} at ${targetEntry?.name ?? "target"}.`
         : params.kind === "defend"
-          ? "Take a defensive stance."
+          ? `${effectiveMoveDestination ? `Move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}) and ` : ""}take a defensive stance.`
           : params.kind === "help"
-            ? "Help an ally."
+            ? `${effectiveMoveDestination ? `Move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}) and ` : ""}help an ally.`
             : params.kind === "disengage"
-              ? "Disengage and reposition."
+              ? `${effectiveMoveDestination ? `Disengage and move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}).` : "Disengage and reposition."}`
               : params.kind === "dash"
-                ? "Dash to a better position."
+                ? `${effectiveMoveDestination ? `Dash to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}).` : "Dash to a better position."}`
                 : params.kind === "take-cover"
-                  ? "Take cover."
+                  ? `${effectiveMoveDestination ? `Move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}) and ` : ""}take cover.`
                   : params.kind === "aim"
-                    ? "Take aim."
+                    ? `${effectiveMoveDestination ? `Move to (${effectiveMoveDestination.x}, ${effectiveMoveDestination.y}) and ` : ""}take aim.`
                     : params.kind === "attempt-escape"
                       ? "Attempt to run away and disengage from combat."
                       : params.kind === "surrender"
                         ? "Surrender and end hostilities."
           : "Hold position and pass.";
-    const actorCharacter =
-      (activeEntry.id ? characterMapById.get(activeEntry.id) : null) ??
-      characterMapByName.get(normalizeCharacterLookupName(activeEntry.name)) ??
-      null;
     const actorIsMainCharacter = Boolean(actorCharacter?.isMainCharacter);
     const actorMessageRole: ChatMessage["role"] =
       activeEntry.type === "character"
@@ -1839,8 +2612,16 @@ export default function CampaignPage() {
 
     try {
       const actionSeedInput = crypto.randomUUID();
+      const submitStartedAt =
+        typeof performance !== "undefined" ? performance.now() : Date.now();
       const requestPayload = {
         action: "submit",
+        localFastMode: true,
+        runtime: {
+          ruleset: campaign.ruleset,
+          combatStateJson: combatState,
+          characters: campaign.characters,
+        },
         kind: params.kind,
         actor: activeEntry.id ?? activeEntry.name,
         target: targetEntry ? targetEntry.id ?? targetEntry.name : undefined,
@@ -1860,11 +2641,26 @@ export default function CampaignPage() {
           params.kind === "attack" || params.kind === "cast-spell"
             ? selectedAttackPreset?.damageBonus
             : undefined,
+        attackPresetCategory:
+          params.kind === "attack" || params.kind === "cast-spell"
+            ? selectedAttackPreset?.category
+            : undefined,
+        attackPresetLabel:
+          params.kind === "attack" || params.kind === "cast-spell"
+            ? selectedAttackPreset?.label
+            : undefined,
+        attackRangeMode:
+          params.kind === "attack" && selectedAttackPreset
+            ? inferAttackRangeModeFromPreset(selectedAttackPreset)
+            : undefined,
         spellName: params.kind === "cast-spell" ? selectedAttackPreset?.spellName : undefined,
         spellSlot:
           params.kind === "cast-spell" && selectedCombatSpellConsumesSlot
             ? combatSpellSlotLevel
             : undefined,
+        moveToX: effectiveMoveDestination?.x,
+        moveToY: effectiveMoveDestination?.y,
+        blockedTileKeys: Array.from(combatMapBlockedSet),
         seedInput: actionSeedInput,
       };
       const response = await fetch(`/api/campaigns/${campaignId}/combat`, {
@@ -1876,6 +2672,14 @@ export default function CampaignPage() {
         body: JSON.stringify(requestPayload),
       });
       const data = await response.json();
+      const submitDurationMs = Math.round(
+        (typeof performance !== "undefined" ? performance.now() : Date.now()) -
+          submitStartedAt,
+      );
+      appendCombatTrace("player-submit-timing", {
+        kind: params.kind,
+        durationMs: submitDurationMs,
+      });
 
       if (response.ok && data?.requiresReaction && data?.reactionPrompt) {
         appendCombatTrace("player-reaction-required", {
@@ -1923,18 +2727,29 @@ export default function CampaignPage() {
       });
       const resolutionNarration = buildCombatEngineResolutionNarration(typedResolution);
       const reactionRefreshLine = getReactionRefreshLogLine(combatState, nextCombatState);
+      const mergedCharacters = mergeCampaignCharacters(
+        campaign.characters,
+        data.characters,
+      );
       setCampaign((currentCampaign) =>
         currentCampaign
           ? {
               ...currentCampaign,
               combatStateJson: nextCombatState,
-              characters: mergeCampaignCharacters(
-                currentCampaign.characters,
-                data.characters,
-              ),
+              characters: mergedCharacters,
             }
           : currentCampaign,
       );
+      queueCombatCheckpointPersist({
+        combatState: nextCombatState,
+        characters: mergedCharacters,
+        reason:
+          nextCombatState.round !== combatState.round
+            ? "round-transition"
+            : "player-action",
+      });
+      setCommittedCombatMove(null);
+      setPendingCombatMoveDestination(null);
 
       const speaker = resolveEngineActionSpeaker(
         typeof typedResolution.actor === "string" ? typedResolution.actor : undefined,
@@ -1981,6 +2796,11 @@ export default function CampaignPage() {
 
       const outcomeHandoffMessage = getCombatOutcomeHandoffMessage(typedResolution);
       if (outcomeHandoffMessage) {
+        await persistCombatCheckpointNow({
+          combatState: nextCombatState,
+          characters: mergedCharacters,
+          reason: "combat-end",
+        });
         await endEngineCombatAndHandoff({
           handoffMessage: outcomeHandoffMessage,
           requireActiveEngineCombat: false,
@@ -1989,9 +2809,53 @@ export default function CampaignPage() {
         return true;
       }
 
-      const finalCombatState = await runEngineAutoTurns(nextCombatState);
+      // Release player-action lock before running enemy auto-turn loop so "Resolving..."
+      // only covers the player's submitted action.
+      setLoading(false);
+      setIsSubmittingCombatAction(false);
+
+      const finalCombatState = await runEngineAutoTurns(nextCombatState, {
+        ruleset: campaign.ruleset,
+        characters: mergedCharacters,
+      });
       await maybeAutoEndEngineCombatFromState(finalCombatState);
     } catch (err) {
+      if (appliedOptimisticMove) {
+        setCampaign((currentCampaign) =>
+          currentCampaign
+            ? {
+                ...currentCampaign,
+                combatStateJson: previousCombatState,
+              }
+            : currentCampaign,
+        );
+      }
+      if (stagedMoveForActor) {
+        setCampaign((currentCampaign) => {
+          if (!currentCampaign) {
+            return currentCampaign;
+          }
+          const currentCombatState = currentCampaign.combatStateJson ?? DEFAULT_COMBAT_STATE;
+          return {
+            ...currentCampaign,
+            combatStateJson: {
+              ...currentCombatState,
+              roster: currentCombatState.roster.map((entry) => {
+                const entryRef = entry.id ?? entry.name;
+                if (entryRef !== stagedMoveForActor.actorRef) {
+                  return entry;
+                }
+                return {
+                  ...entry,
+                  gridX: stagedMoveForActor.origin.x,
+                  gridY: stagedMoveForActor.origin.y,
+                };
+              }),
+            },
+          };
+        });
+        setCommittedCombatMove(null);
+      }
       setError(err instanceof Error ? err.message : "Unable to resolve combat action.");
     } finally {
       setLoading(false);
@@ -2019,6 +2883,12 @@ export default function CampaignPage() {
         },
         body: JSON.stringify({
           action: "submit",
+          localFastMode: true,
+          runtime: {
+            ruleset: campaign.ruleset,
+            combatStateJson: campaign.combatStateJson ?? DEFAULT_COMBAT_STATE,
+            characters: campaign.characters,
+          },
           kind: pendingReaction.kind,
           actor: pendingReaction.actorRef,
           target: pendingReaction.targetRef,
@@ -2047,19 +2917,28 @@ export default function CampaignPage() {
         previousCombatState,
         nextCombatState,
       );
+      const mergedCharacters = mergeCampaignCharacters(
+        campaign.characters,
+        data.characters,
+      );
 
       setCampaign((currentCampaign) =>
         currentCampaign
           ? {
               ...currentCampaign,
               combatStateJson: nextCombatState,
-              characters: mergeCampaignCharacters(
-                currentCampaign.characters,
-                data.characters,
-              ),
+              characters: mergedCharacters,
             }
           : currentCampaign,
       );
+      queueCombatCheckpointPersist({
+        combatState: nextCombatState,
+        characters: mergedCharacters,
+        reason:
+          nextCombatState.round !== previousCombatState.round
+            ? "round-transition"
+            : "reaction",
+      });
 
       const speaker = resolveEngineActionSpeaker(
         typeof typedResolution.actor === "string" ? typedResolution.actor : undefined,
@@ -2099,7 +2978,10 @@ export default function CampaignPage() {
         createdAt: new Date().toISOString(),
       });
       setPendingReaction(null);
-      const finalCombatState = await runEngineAutoTurns(nextCombatState);
+      const finalCombatState = await runEngineAutoTurns(nextCombatState, {
+        ruleset: campaign.ruleset,
+        characters: mergedCharacters,
+      });
       await maybeAutoEndEngineCombatFromState(finalCombatState);
       return true;
     } catch (err) {
@@ -2233,6 +3115,13 @@ export default function CampaignPage() {
     setLoading(true);
 
     try {
+      if (campaign?.combatStateJson?.combatActive) {
+        await persistCombatCheckpointNow({
+          combatState: campaign.combatStateJson,
+          characters: campaign.characters,
+          reason: "combat-end",
+        });
+      }
       const endResponse = await fetch(`/api/campaigns/${campaignId}/combat`, {
         method: "POST",
         headers: {
@@ -2634,8 +3523,23 @@ export default function CampaignPage() {
               ]);
             }
 
-            const finalCombatState = await runEngineAutoTurns(startedCombatState);
-            await maybeAutoEndEngineCombatFromState(finalCombatState);
+            const startedActiveEntry =
+              startedCombatState.roster.find((entry) => entry.active) ??
+              startedCombatState.roster[startedCombatState.turnIndex] ??
+              null;
+            const shouldAwaitRoundStart =
+              startedCombatState.combatActive &&
+              startedCombatState.round === 1 &&
+              startedActiveEntry?.type === "enemy";
+            setAwaitingCombatRoundStart(shouldAwaitRoundStart);
+
+            if (!shouldAwaitRoundStart) {
+              const finalCombatState = await runEngineAutoTurns(startedCombatState, {
+                ruleset: campaign?.ruleset ?? "",
+                characters: campaign?.characters ?? [],
+              });
+              await maybeAutoEndEngineCombatFromState(finalCombatState);
+            }
           }
         }
       } catch (err) {
@@ -3540,6 +4444,40 @@ export default function CampaignPage() {
     });
   }
 
+  function handleSetCombatMapTokenScalePercent(value: number) {
+    if (!campaignId) {
+      return;
+    }
+    const nextValue = Math.max(50, Math.min(250, Math.round(value)));
+    setCombatMapTokenScalePercent(nextValue);
+    try {
+      window.localStorage.setItem(
+        `combat-map-token-scale:${campaignId}`,
+        String(nextValue),
+      );
+    } catch {
+      // Ignore local storage failures and still update in-memory state.
+    }
+  }
+
+  function handleToggleCombatGridTelemetry() {
+    if (!campaignId) {
+      return;
+    }
+    setShowCombatGridTelemetry((current) => {
+      const nextValue = !current;
+      try {
+        window.localStorage.setItem(
+          `combat-map-grid-telemetry:${campaignId}`,
+          String(nextValue),
+        );
+      } catch {
+        // Ignore local storage failures and still update in-memory state.
+      }
+      return nextValue;
+    });
+  }
+
   async function handleDeleteCharacter(character: CampaignCharacter) {
     if (deletingCharacterId) {
       return;
@@ -4389,6 +5327,210 @@ export default function CampaignPage() {
     );
   }
 
+  const utilityMenuContent = campaign ? (
+    <div className="space-y-1">
+      <button
+        type="button"
+        onClick={handleScenarioAction}
+        disabled={
+          needsCharacterGeneration ||
+          isTogglingScenario ||
+          loading
+        }
+        className="block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-200 transition hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {isTogglingScenario ? "Resetting..." : "Reset"}
+      </button>
+      <button
+        type="button"
+        onClick={handleResyncState}
+        disabled={isResyncingState}
+        className="block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-200 transition hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        {isResyncingState ? "Resyncing..." : "Resync"}
+      </button>
+      <button
+        type="button"
+        onClick={handleToggleDebugStateLogging}
+        className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-zinc-900 ${
+          debugStateLoggingEnabled
+            ? "text-amber-100"
+            : "text-zinc-200"
+        }`}
+      >
+        Debug {debugStateLoggingEnabled ? "On" : "Off"}
+      </button>
+      <button
+        type="button"
+        onClick={handleToggleEngineCombatMode}
+        className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-zinc-900 ${
+          engineCombatModeEnabled
+            ? "text-cyan-100"
+            : "text-zinc-200"
+        }`}
+      >
+        Engine Combat {engineCombatModeEnabled ? "On" : "Off"}
+      </button>
+      <button
+        type="button"
+        onClick={handleToggleAutoCompanionCombat}
+        className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-zinc-900 ${
+          autoCompanionCombatEnabled
+            ? "text-cyan-100"
+            : "text-zinc-200"
+        }`}
+      >
+        Auto Companion Combat {autoCompanionCombatEnabled ? "On" : "Off"}
+      </button>
+      {campaign.ruleset.trim().toLowerCase().includes("deadlands") ? (
+        <button
+          type="button"
+          onClick={handleToggleDeadlandsJokerEffects}
+          className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-zinc-900 ${
+            deadlandsJokerEffectsEnabled
+              ? "text-emerald-100"
+              : "text-zinc-200"
+          }`}
+        >
+          Joker Effects {deadlandsJokerEffectsEnabled ? "On" : "Off"}
+        </button>
+      ) : null}
+      <div className="px-3 py-2">
+        <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+          Combat Token Size
+        </label>
+        <div className="flex items-center gap-2">
+          <input
+            type="range"
+            min={50}
+            max={250}
+            step={5}
+            value={combatMapTokenScalePercent}
+            onChange={(event) =>
+              handleSetCombatMapTokenScalePercent(
+                Number(event.target.value),
+              )
+            }
+            className="w-full accent-cyan-300"
+          />
+          <span className="w-11 text-right text-xs text-zinc-300">
+            {combatMapTokenScalePercent}%
+          </span>
+        </div>
+      </div>
+      <button
+        type="button"
+        onClick={handleToggleCombatGridTelemetry}
+        className={`block w-full rounded-lg px-3 py-2 text-left text-sm transition hover:bg-zinc-900 ${
+          showCombatGridTelemetry ? "text-cyan-100" : "text-zinc-200"
+        }`}
+      >
+        Combat Grid Telemetry {showCombatGridTelemetry ? "On" : "Off"}
+      </button>
+      <div className="px-3 py-2">
+        <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+          Narration
+        </label>
+        <select
+          value={campaign.partyStateJson.narrationLevel}
+          onChange={(event) =>
+            handleSetNarrationLevel(
+              event.target.value as NarrationLevel,
+            )
+          }
+          disabled={isSavingPartyState}
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-2 text-sm text-zinc-200 outline-none transition focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <option value="light">Light</option>
+          <option value="medium">Medium</option>
+          <option value="high">High</option>
+        </select>
+      </div>
+      <div className="px-3 py-2">
+        <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+          Chat Model
+        </label>
+        <select
+          value={campaign.chatModel}
+          onChange={(event) =>
+            handleSetChatModel(
+              event.target.value as CampaignChatModel,
+            )
+          }
+          disabled={isSavingChatModel}
+          className="w-full rounded-lg border border-zinc-700 bg-zinc-900 px-2.5 py-2 text-sm text-zinc-200 outline-none transition focus:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {CAMPAIGN_CHAT_MODELS.map((model) => (
+            <option key={model} value={model}>
+              {model === "gpt-5-mini"
+                ? "GPT-5 Mini"
+                : model === "gpt-5.1"
+                  ? "GPT-5.1"
+                  : "GPT-4o Mini"}
+            </option>
+          ))}
+        </select>
+      </div>
+      {debugStateLoggingEnabled ? (
+        <button
+          type="button"
+          onClick={() => {
+            setIsUtilityMenuOpen(false);
+            setIsDebugInspectorOpen(true);
+          }}
+          className="block w-full rounded-lg px-3 py-2 text-left text-sm text-zinc-200 transition hover:bg-zinc-900"
+        >
+          Open Debug
+        </button>
+      ) : null}
+      {isDevBuild && mainCharacter ? (
+        <button
+          type="button"
+          onClick={() => {
+            setIsUtilityMenuOpen(false);
+            void handleDeleteCharacter(mainCharacter);
+          }}
+          disabled={Boolean(deletingCharacterId)}
+          className="block w-full rounded-lg px-3 py-2 text-left text-sm text-amber-200 transition hover:bg-zinc-900 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          DEV: Clear Main Character
+        </button>
+      ) : null}
+      <div className="px-3 pb-1 pt-2 text-[10px] text-zinc-500">
+        ID: {campaignId}
+      </div>
+    </div>
+  ) : null;
+
+  function renderUtilityMenu(menuPositionClass: string, compact = false) {
+    if (!campaign) {
+      return null;
+    }
+    return (
+      <>
+        <button
+          type="button"
+          onClick={() =>
+            setIsUtilityMenuOpen((current) => !current)
+          }
+          className={`inline-flex items-center justify-center rounded-lg border border-zinc-700 bg-zinc-950 text-zinc-300 transition hover:border-zinc-500 hover:text-white ${
+            compact ? "h-6 w-6 text-xs" : "h-8 w-8 text-sm"
+          }`}
+          aria-label="Open campaign tools"
+        >
+          ⚙
+        </button>
+        {isUtilityMenuOpen ? (
+          <div
+            className={`absolute ${menuPositionClass} z-10 min-w-[12rem] rounded-xl border border-zinc-700 bg-zinc-950 p-2 shadow-2xl`}
+          >
+            {utilityMenuContent}
+          </div>
+        ) : null}
+      </>
+    );
+  }
+
   return (
     <main className="min-h-screen bg-zinc-950 text-zinc-100 p-4 md:p-5">
       {confirmationState ? (
@@ -4707,6 +5849,7 @@ export default function CampaignPage() {
               ...(params.encounterVariance
                 ? { encounterVariance: params.encounterVariance }
                 : {}),
+              ...(params.encounterIntent ? { encounterIntent: params.encounterIntent } : {}),
             },
             "Unable to update combat generation presets.",
           )
@@ -4714,7 +5857,13 @@ export default function CampaignPage() {
       />
 
       <div className="mx-auto grid max-w-[98.75rem] gap-4 overflow-x-hidden xl:grid-cols-[minmax(0,1fr)_minmax(260px,350px)] 2xl:grid-cols-[minmax(0,1fr)_minmax(340px,440px)]">
-        <section className="rounded-2xl border border-zinc-800 bg-zinc-900 p-3 shadow">
+        <section
+          className={`rounded-2xl border border-zinc-800 bg-zinc-900 p-3 shadow ${
+            engineCombatUiLocked
+              ? "flex h-[calc(100vh-2.75rem)] min-h-0 flex-col overflow-hidden"
+              : ""
+          }`}
+        >
           <div className="mb-3 flex items-start justify-between gap-3">
             <div>
               <h1 className="text-xl font-semibold">
@@ -4726,9 +5875,48 @@ export default function CampaignPage() {
             </div>
 
             <div className="flex items-center gap-2">
-                <Link
-                  href="/"
-                  className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-zinc-500 hover:text-white"
+              <div className="hidden items-center gap-1 rounded-xl border border-zinc-700 bg-zinc-950 px-2 py-1 sm:flex">
+                <span className="text-[10px] uppercase tracking-[0.12em] text-zinc-400">
+                  Intent
+                </span>
+                {(["easy", "standard", "hard"] as const).map((intent) => (
+                  <button
+                    key={`intent-quick-${intent}`}
+                    type="button"
+                    onClick={() => {
+                      setEncounterIntentQuick(intent);
+                      void applyDebugBootstrapAction(
+                        {
+                          action: "set-combat-generation",
+                          encounterIntent: intent,
+                        },
+                        "Unable to update encounter intent.",
+                      );
+                    }}
+                    disabled={isApplyingDebugBootstrapAction}
+                    className={`rounded-md border px-2 py-0.5 text-[11px] transition ${
+                      encounterIntentQuick === intent
+                        ? "border-cyan-400/60 bg-cyan-500/20 text-cyan-100"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-zinc-500"
+                    } disabled:cursor-not-allowed disabled:opacity-50`}
+                  >
+                    {intent}
+                  </button>
+                ))}
+              </div>
+              {engineCombatUiLocked ? (
+                <button
+                  type="button"
+                  onClick={handleUndoLastTurn}
+                  disabled={loading || isUndoingTurn || !canUndoLastTurn}
+                  className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  {isUndoingTurn ? "Undoing..." : "Undo"}
+                </button>
+              ) : null}
+              <Link
+                href="/"
+                className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-zinc-500 hover:text-white"
               >
                 Back to launcher
               </Link>
@@ -4786,6 +5974,7 @@ export default function CampaignPage() {
             </div>
           ) : null}
 
+          {!engineCombatUiLocked ? (
           <section className="mb-3 rounded-xl border border-zinc-800 bg-zinc-950/80 p-3.5">
             <div className="flex items-center justify-between gap-2">
               <div className="text-[11px] font-semibold uppercase tracking-[0.18em] text-zinc-500">
@@ -4843,94 +6032,767 @@ export default function CampaignPage() {
               {sceneSummary.goal}
             </div>
           </section>
-
-            <div
-              ref={chatScrollContainerRef}
-              onScroll={(event) => {
-                if (!followChatLive) {
-                  return;
-                }
-                const node = event.currentTarget;
-                const distanceFromBottom =
-                  node.scrollHeight - node.scrollTop - node.clientHeight;
-                setChatAutoScrollPaused(distanceFromBottom > 72);
-              }}
-              className={`overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-3 ${
-                engineCombatUiLocked ? "h-[60vh]" : "h-[50vh]"
-              }`}
-            >
-            {messages.map((msg, index) => (
-              (() => {
-                const bubbleStyles = getMessageBubbleStyles(msg, companionColorMap);
-                return (
-              <div
-                key={msg.id ?? `${msg.role}-${index}`}
-                className={`rounded-xl border p-3 ${bubbleStyles.containerClass}`}
-              >
-                <div
-                  className={`mb-1 text-xs uppercase tracking-[0.16em] ${bubbleStyles.labelClass}`}
-                >
-                  {msg.speakerName}
+          ) : (
+            <section className="relative mb-3 flex min-h-0 flex-1 flex-col rounded-xl border border-cyan-500/30 bg-zinc-950/80 p-2.5">
+              <div className="mb-2 flex items-center justify-between gap-2">
+                <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.16em] text-cyan-200">
+                  <span>Combat Battle Grid</span>
+                  <span className="rounded-full border border-cyan-400/40 bg-cyan-500/10 px-2 py-0.5 text-[10px] font-medium normal-case tracking-normal text-cyan-100">
+                    {combatEncounterHeaderText}
+                  </span>
+                  {combatEncounterAdjustedXp > 0 ? (
+                    <div className="group relative">
+                      <button
+                        type="button"
+                        className="rounded-full border border-cyan-400/40 bg-cyan-500/10 px-1.5 py-0 text-[10px] font-semibold normal-case tracking-normal text-cyan-100"
+                        aria-label="Encounter XP details"
+                        title="Encounter XP details"
+                      >
+                        i
+                      </button>
+                      <div className="pointer-events-none absolute left-0 top-full z-20 mt-1 hidden min-w-48 rounded-md border border-cyan-500/40 bg-zinc-950/95 px-2 py-1.5 text-[10px] font-medium normal-case tracking-normal text-cyan-100 shadow-lg group-hover:block group-focus-within:block">
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-zinc-300">Base XP</span>
+                          <span>{combatEncounterBaseXp.toLocaleString()}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-zinc-300">Multiplier</span>
+                          <span>x{combatEncounterMultiplier.toFixed(1)}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-zinc-300">Adjusted XP</span>
+                          <span>{combatEncounterAdjustedXp.toLocaleString()}</span>
+                        </div>
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="text-zinc-300">Difficulty</span>
+                          <span>{combatEncounterDifficulty}</span>
+                        </div>
+                        {combatEncounterThresholdDeadly > 0 ? (
+                          <div className="mt-1 border-t border-zinc-800 pt-1 text-[9px] text-zinc-300">
+                            <div>
+                              Thresholds E/M/H/D:{" "}
+                              {combatEncounterThresholdEasy.toLocaleString()} /{" "}
+                              {combatEncounterThresholdMedium.toLocaleString()} /{" "}
+                              {combatEncounterThresholdHard.toLocaleString()} /{" "}
+                              {combatEncounterThresholdDeadly.toLocaleString()}
+                            </div>
+                          </div>
+                        ) : null}
+                      </div>
+                    </div>
+                  ) : null}
                 </div>
-                <MessageBody
-                  role={msg.role}
-                  content={msg.content}
-                  suppressChoiceList={
-                    msg.role === "gm" &&
-                    (engineCombatUiLocked ||
-                      (engineCombatModeEnabled &&
-                        /\b(?:combat\s+begins?|combat\s+is\s+now\s+active|combat\s+active|initiative)\b/i.test(
-                          msg.content,
-                        )))
-                  }
-                />
-              </div>
-                );
-              })()
-            ))}
-
-            {loading && (
-              <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-3 text-zinc-400">
-                GM is thinking...
-              </div>
-            )}
-          </div>
-          <div className="mt-2 flex h-5 items-center justify-between gap-2 text-[11px] text-zinc-400">
-            <label className="inline-flex items-center gap-2 whitespace-nowrap">
-              <input
-                type="checkbox"
-                checked={followChatLive}
-                onChange={(event) => {
-                  setFollowChatLive(event.target.checked);
-                  if (event.target.checked) {
-                    setChatAutoScrollPaused(false);
-                    const node = chatScrollContainerRef.current;
-                    if (node) {
-                      node.scrollTop = node.scrollHeight;
+                <div className="flex items-center gap-1">
+                  <button
+                    type="button"
+                    onClick={() => setShowCombatGrid((current) => !current)}
+                    className={`rounded-md border px-2 py-0.5 text-[11px] transition ${
+                      showCombatGrid
+                        ? "border-cyan-300/70 bg-cyan-500/20 text-cyan-100"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-cyan-400/50"
+                    }`}
+                    title={showCombatGrid ? "Hide grid" : "Show grid"}
+                    aria-label={showCombatGrid ? "Hide grid" : "Show grid"}
+                  >
+                    #
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCombatBlockedTiles((current) => !current)}
+                    className={`rounded-md border px-2 py-0.5 text-[11px] transition ${
+                      showCombatBlockedTiles
+                        ? "border-red-300/70 bg-red-500/20 text-red-200"
+                        : "border-zinc-700 bg-zinc-900 text-red-300/80 hover:border-red-400/50"
+                    }`}
+                    title={
+                      showCombatBlockedTiles ? "Hide blocked tiles" : "Show blocked tiles"
                     }
-                  }
-                }}
-              />
-              Follow latest chat
-            </label>
-            {followChatLive && chatAutoScrollPaused ? (
-              <button
-                type="button"
-                onClick={() => {
-                  setChatAutoScrollPaused(false);
-                  const node = chatScrollContainerRef.current;
-                  if (node) {
-                    node.scrollTop = node.scrollHeight;
-                  }
-                }}
-                className="h-5 shrink-0 whitespace-nowrap rounded-md border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-200 transition hover:border-zinc-500"
-              >
-                Jump to latest
-              </button>
-            ) : null}
-          </div>
+                    aria-label={
+                      showCombatBlockedTiles ? "Hide blocked tiles" : "Show blocked tiles"
+                    }
+                  >
+                    ⛔
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setCombatMapZoomPercent((current) => Math.max(50, current - 10))}
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-200"
+                  >
+                    -
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCombatTokenLabels((current) => !current)}
+                    className={`rounded-md border px-2 py-0.5 text-[11px] transition ${
+                      showCombatTokenLabels
+                        ? "border-indigo-300/70 bg-indigo-500/20 text-indigo-100"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-indigo-400/50"
+                    }`}
+                    title={showCombatTokenLabels ? "Hide token names" : "Show token names"}
+                    aria-label={showCombatTokenLabels ? "Hide token names" : "Show token names"}
+                  >
+                    N
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setShowCombatTokenBadges((current) => !current)}
+                    className={`rounded-md border px-2 py-0.5 text-[11px] transition ${
+                      showCombatTokenBadges
+                        ? "border-emerald-300/70 bg-emerald-500/20 text-emerald-100"
+                        : "border-zinc-700 bg-zinc-900 text-zinc-300 hover:border-emerald-400/50"
+                    }`}
+                    title={showCombatTokenBadges ? "Hide token badges" : "Show token badges"}
+                    aria-label={showCombatTokenBadges ? "Hide token badges" : "Show token badges"}
+                  >
+                    HP
+                  </button>
+                  <span className="w-10 text-center text-[11px] text-zinc-400">
+                    {combatMapZoomPercent}%
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setCombatMapZoomPercent((current) => Math.min(250, current + 10))}
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-1.5 py-0.5 text-[11px] text-zinc-200"
+                  >
+                    +
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setCombatMapZoomPercent(100);
+                      setCombatMapPanOffset({ x: 0, y: 0 });
+                    }}
+                    className="rounded-md border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-[11px] text-zinc-200"
+                  >
+                    Reset
+                  </button>
+                  <div className="relative ml-1">
+                    {renderUtilityMenu("top-8 right-0", true)}
+                  </div>
+                </div>
+              </div>
+              <div className="min-h-0 flex-1 rounded-lg border border-zinc-800 bg-zinc-950 p-1">
+                <div
+                  className={`relative h-full overflow-hidden rounded-md border border-zinc-800 bg-zinc-900 ${isCombatMapDragging ? "cursor-grabbing" : "cursor-grab"}`}
+                  onWheel={(event) => {
+                    event.preventDefault();
+                    setCombatMapZoomPercent((current) =>
+                      Math.max(50, Math.min(250, current + (event.deltaY < 0 ? 10 : -10))),
+                    );
+                  }}
+                  onMouseDown={(event) => {
+                    if (event.button !== 0) {
+                      return;
+                    }
+                    setIsCombatMapDragging(true);
+                    combatMapDragStartRef.current = {
+                      mouseX: event.clientX,
+                      mouseY: event.clientY,
+                      panX: combatMapPanOffset.x,
+                      panY: combatMapPanOffset.y,
+                    };
+                  }}
+                  onMouseMove={(event) => {
+                    if (!isCombatMapDragging || !combatMapDragStartRef.current) {
+                      return;
+                    }
+                    const dragStart = combatMapDragStartRef.current;
+                    setCombatMapPanOffset({
+                      x: dragStart.panX + (event.clientX - dragStart.mouseX),
+                      y: dragStart.panY + (event.clientY - dragStart.mouseY),
+                    });
+                  }}
+                  onMouseUp={() => {
+                    setIsCombatMapDragging(false);
+                    combatMapDragStartRef.current = null;
+                  }}
+                  onMouseLeave={() => {
+                    setIsCombatMapDragging(false);
+                    combatMapDragStartRef.current = null;
+                  }}
+                >
+                  {isLoadingCombatMapTemplate ? (
+                    <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-400">
+                      Loading combat map...
+                    </div>
+                  ) : null}
+                  {!isLoadingCombatMapTemplate && !combatMapTemplate ? (
+                    <div className="absolute inset-0 flex items-center justify-center text-sm text-zinc-500">
+                      No battle map template found for this scene.
+                    </div>
+                  ) : null}
+                  {showCombatTokenLoadingOverlay ? (
+                    <div className="absolute inset-0 z-20 flex items-center justify-center bg-zinc-950/55 text-sm text-zinc-100">
+                      Loading tokens... {loadedCombatTokenImageCount}/{combatMapTokenImageSources.length}
+                    </div>
+                  ) : null}
+                  {combatMapTemplate ? (
+                    <div
+                      className="absolute left-1/2 top-1/2"
+                      style={{
+                        transform: `translate(calc(-50% + ${combatMapPanOffset.x}px), calc(-50% + ${combatMapPanOffset.y}px)) scale(${combatMapZoomPercent / 100})`,
+                        transformOrigin: "center center",
+                        width: `${Math.max(1, combatMapTemplate.gridCols) * 48}px`,
+                        height: `${Math.max(1, combatMapTemplate.gridRows) * 48}px`,
+                      }}
+                    >
+                      <div
+                        className="relative h-full w-full"
+                        style={{
+                          backgroundImage: (combatMapTemplate.imageDataUrl || combatMapTemplate.referenceUrl)
+                            ? `url("${(combatMapTemplate.imageDataUrl || combatMapTemplate.referenceUrl || "").replace(/"/g, '\\"')}")`
+                            : undefined,
+                          backgroundSize: "100% 100%",
+                          backgroundPosition: "center",
+                        }}
+                      >
+                        <div
+                          className="grid h-full w-full"
+                          style={{
+                            gridTemplateColumns: `repeat(${Math.max(1, combatMapTemplate.gridCols)}, 48px)`,
+                            gridTemplateRows: `repeat(${Math.max(1, combatMapTemplate.gridRows)}, 48px)`,
+                          }}
+                        >
+                          {Array.from({
+                            length: Math.max(1, combatMapTemplate.gridCols) * Math.max(1, combatMapTemplate.gridRows),
+                          }).map((_, index) => {
+                            const x = index % Math.max(1, combatMapTemplate.gridCols);
+                            const y = Math.floor(index / Math.max(1, combatMapTemplate.gridCols));
+                            const tileKey = `${x},${y}`;
+                            const blocked = combatMapBlockedSet.has(tileKey);
+                            const inNormalMoveRange = combatMovementRangeOverlay.normal.has(tileKey);
+                            const inDashOnlyRange = combatMovementRangeOverlay.dashOnly.has(tileKey);
+                            const isOriginTile = combatMovementRangeOverlay.origin === tileKey;
+                            const selectedForMove =
+                              pendingCombatMoveDestination &&
+                              pendingCombatMoveDestination.x === x &&
+                              pendingCombatMoveDestination.y === y;
+                            return (
+                              <div
+                                key={`combat-grid-${x}-${y}`}
+                                role="button"
+                                tabIndex={0}
+                                onClick={() => {
+                                  if (!engineCombatUiLocked) {
+                                    return;
+                                  }
+                                  if (!movementSelectionEnabled) {
+                                    return;
+                                  }
+                                  if (
+                                    !combatActiveEntry ||
+                                    combatActiveEntry.type !== "character" ||
+                                    typeof combatActiveEntry.gridX !== "number" ||
+                                    typeof combatActiveEntry.gridY !== "number"
+                                  ) {
+                                    return;
+                                  }
+                                  if (blocked) {
+                                    return;
+                                  }
+                                  const activeOccupied = new Set(
+                                    getCombatantOccupiedTileKeys(combatActiveEntry),
+                                  );
+                                  const destinationOccupied = getCombatantOccupiedTileKeys({
+                                    ...combatActiveEntry,
+                                    gridX: x,
+                                    gridY: y,
+                                  });
+                                  const occupiedByOther = destinationOccupied.some(
+                                    (key) =>
+                                      combatMapOccupiedSet.has(key) &&
+                                      !activeOccupied.has(key),
+                                  );
+                                  if (occupiedByOther) {
+                                    return;
+                                  }
+                                  const blockedByDestination = destinationOccupied.some(
+                                    (key) => combatMapBlockedSet.has(key) && !activeOccupied.has(key),
+                                  );
+                                  if (blockedByDestination) {
+                                    return;
+                                  }
+                                  const tileDistance = getGridTileDistance(
+                                    { x: combatActiveEntry.gridX, y: combatActiveEntry.gridY },
+                                    { x, y },
+                                  );
+                                  if (tileDistance > Math.max(1, activeCombatSpeedTiles) * 2) {
+                                    return;
+                                  }
+                                  setPendingCombatMoveDestination({ x, y });
+                                }}
+                                className={`${
+                                  showCombatGrid ? "border border-zinc-900/60" : "border border-transparent"
+                                } ${
+                                  selectedForMove
+                                    ? "bg-cyan-400/16 ring-1 ring-inset ring-cyan-300/55"
+                                    : isOriginTile
+                                      ? "bg-sky-400/10 ring-1 ring-inset ring-sky-300/45"
+                                      : inNormalMoveRange
+                                        ? "bg-emerald-400/10"
+                                        : inDashOnlyRange
+                                          ? "bg-orange-400/10"
+                                    : blocked && showCombatBlockedTiles
+                                      ? "bg-red-500/20"
+                                      : showCombatGrid
+                                        ? "bg-black/5"
+                                        : "bg-transparent"
+                                } ${
+                                  blocked
+                                    ? "cursor-not-allowed"
+                                    : showCombatGrid
+                                      ? "cursor-pointer hover:bg-cyan-300/7"
+                                      : "cursor-pointer"
+                                }`}
+                              />
+                            );
+                          })}
+                        </div>
+                        {selectedTargetLine ? (
+                          <svg className="pointer-events-none absolute inset-0 z-[2] h-full w-full">
+                            <line
+                              x1={selectedTargetLine.x1}
+                              y1={selectedTargetLine.y1}
+                              x2={selectedTargetLine.x2}
+                              y2={selectedTargetLine.y2}
+                              stroke="rgba(74,222,128,0.18)"
+                              strokeWidth={2}
+                              strokeDasharray="5 4"
+                            />
+                          </svg>
+                        ) : null}
+                        {hoveredTargetLine ? (
+                          <svg className="pointer-events-none absolute inset-0 z-[2] h-full w-full">
+                            <line
+                              x1={hoveredTargetLine.x1}
+                              y1={hoveredTargetLine.y1}
+                              x2={hoveredTargetLine.x2}
+                              y2={hoveredTargetLine.y2}
+                              stroke={
+                                hoveredTargetLine.blocked
+                                  ? "rgba(248,113,113,0.55)"
+                                  : "rgba(74,222,128,0.55)"
+                              }
+                              strokeWidth={2}
+                              strokeDasharray="5 4"
+                            />
+                          </svg>
+                        ) : null}
+                                                {selectedMeleeIndicator ? (
+                          <div
+                            className="pointer-events-none absolute z-[3] -translate-x-1/2 -translate-y-1/2 text-2xl font-semibold text-cyan-100/22 drop-shadow-[0_0_6px_rgba(34,211,238,0.12)]"
+                            style={{
+                              left: `${selectedMeleeIndicator.x}px`,
+                              top: `${selectedMeleeIndicator.y}px`,
+                            }}
+                          >
+                            {"\u2694"}
+                          </div>
+                        ) : null}
+                        {hoveredMeleeIndicator ? (
+                          <div
+                            className="pointer-events-none absolute z-[3] -translate-x-1/2 -translate-y-1/2 text-2xl font-semibold text-cyan-100/65 drop-shadow-[0_0_6px_rgba(34,211,238,0.25)]"
+                            style={{
+                              left: `${hoveredMeleeIndicator.x}px`,
+                              top: `${hoveredMeleeIndicator.y}px`,
+                            }}
+                          >
+                            {"\u2694"}
+                          </div>
+                        ) : null}
+                        {combatMapTokens.map((entry) => {
+                          const footprintCols = getCombatantFootprintCols(entry);
+                          const footprintRows = getCombatantFootprintRows(entry);
+                          const baseTokenSize = Math.max(
+                            24,
+                            Math.min(72 * Math.max(footprintCols, footprintRows), Math.round(48 * 0.85 * Math.max(footprintCols, footprintRows))),
+                          );
+                          const effectiveScalePercent = getCombatTokenScalePercent(
+                            entry,
+                            combatMapTokenScalePercent,
+                          );
+                          const tokenSize = Math.max(
+                            12,
+                            Math.round((baseTokenSize * effectiveScalePercent) / 100),
+                          );
+                          const leftPx = ((entry.gridX ?? 0) + footprintCols / 2) * 48;
+                          const topPx = ((entry.gridY ?? 0) + footprintRows / 2) * 48 - 2;
+                          const tokenBadgeText = getCombatTokenBadgeText(entry);
+                          const tokenDefeated = isCombatantDefeated(entry);
+                          const tokenImageSource = getCombatTokenImageSource(entry);
+                          return (
+                            <div
+                              key={`combat-token-${entry.id ?? `${entry.type}:${entry.name}:${entry.creatureSlug ?? ""}`}`}
+                              className="absolute -translate-x-1/2 -translate-y-1/2"
+                              style={{
+                                left: `${leftPx}px`,
+                                top: `${topPx}px`,
+                                transition:
+                                  isCombatMapDragging
+                                    ? undefined
+                                    : "left 600ms cubic-bezier(0.4, 0, 0.2, 1), top 600ms cubic-bezier(0.4, 0, 0.2, 1)",
+                              }}
+                              title={`${entry.name}${typeof entry.gridX === "number" && typeof entry.gridY === "number" ? ` (${entry.gridX},${entry.gridY})` : ""}`}
+                              onClick={() => {
+                                if (!engineCombatUiLocked || !combatActiveEntry) {
+                                  return;
+                                }
+                                const activeRef = combatActiveEntry.id ?? combatActiveEntry.name;
+                                const clickedRef = entry.id ?? entry.name;
+                                if (
+                                  combatActiveEntry.type === "character" &&
+                                  activeRef &&
+                                  clickedRef === activeRef
+                                ) {
+                                  setSelectedMovementActorRef((current) =>
+                                    current === activeRef ? null : activeRef,
+                                  );
+                                  setPendingCombatMoveDestination(null);
+                                  return;
+                                }
+                                const targetType =
+                                  combatActiveEntry.type === "enemy" ? "character" : "enemy";
+                                if (entry.type !== targetType) {
+                                  return;
+                                }
+                                const targetRef = entry.id ?? entry.name;
+                                if (!combatValidTargetRefSet.has(targetRef)) {
+                                  return;
+                                }
+                                if (
+                                  hoverAttackRangeMode === "ranged" &&
+                                  combatActionTargetRef === targetRef
+                                ) {
+                                  setCombatActionTargetRef("");
+                                  return;
+                                }
+                                setCombatActionTargetRef(targetRef);
+                                setCombatActionKind((current) =>
+                                  current === "cast-spell" ? current : "attack",
+                                );
+                              }}
+                              onMouseEnter={() => {
+                                if (!combatActiveEntry) {
+                                  return;
+                                }
+                                if (
+                                  combatActionKind !== "attack" &&
+                                  combatActionKind !== "cast-spell"
+                                ) {
+                                  return;
+                                }
+                                const targetType =
+                                  combatActiveEntry.type === "enemy" ? "character" : "enemy";
+                                if (entry.type !== targetType) {
+                                  return;
+                                }
+                                setHoveredCombatTargetRef(entry.id ?? entry.name);
+                              }}
+                              onMouseLeave={() => {
+                                const entryRef = entry.id ?? entry.name;
+                                setHoveredCombatTargetRef((current) =>
+                                  current === entryRef ? null : current,
+                                );
+                              }}
+                            >
+                              {showCombatTokenBadges && tokenBadgeText ? (
+                                <div className="pointer-events-none absolute -top-3 left-1/2 -translate-x-1/2 rounded border border-zinc-700/80 bg-zinc-950/90 px-1 py-px text-[10px] font-semibold text-emerald-200">
+                                  {tokenBadgeText}
+                                </div>
+                              ) : null}
+                              <div
+                                className={`relative rounded-full transition-shadow duration-200 hover:shadow-[0_0_0_1px_rgba(103,232,249,0.45),0_0_8px_rgba(34,211,238,0.25)] ${
+                                  tokenDefeated ? "opacity-50 grayscale" : ""
+                                }`}
+                                style={{
+                                  width: `${tokenSize}px`,
+                                  height: `${tokenSize}px`,
+                                  backgroundImage:
+                                    tokenImageSource
+                                      ? `url("${tokenImageSource.replace(/"/g, '\\"')}")`
+                                      : undefined,
+                                  backgroundColor: tokenImageSource ? "transparent" : "rgba(24,24,27,0.92)",
+                                  backgroundSize: "cover",
+                                  backgroundPosition: "center",
+                                  boxShadow:
+                                    entry.active && movementSelectionEnabled
+                                      ? "0 0 0 1px rgba(103,232,249,0.9), 0 0 10px rgba(34,211,238,0.7)"
+                                      : hoveredCombatTargetRef === (entry.id ?? entry.name)
+                                        ? "0 0 0 1px rgba(56,189,248,0.55), 0 0 8px rgba(56,189,248,0.3)"
+                                      : undefined,
+                                }}
+                              >
+                                {!tokenImageSource ? (
+                                  <div className="pointer-events-none absolute inset-0 flex items-center justify-center rounded-full border border-zinc-500/60 text-[10px] font-semibold uppercase tracking-wide text-zinc-100">
+                                    {getCombatTokenInitials(entry.name)}
+                                  </div>
+                                ) : null}
+                                {tokenDefeated ? (
+                                  <div className="pointer-events-none absolute -bottom-1 -right-1 rounded border border-red-400/80 bg-red-600/90 px-1 py-px text-[9px] font-bold uppercase text-white">
+                                    KO
+                                  </div>
+                                ) : null}
+                              </div>
+                              {showCombatTokenLabels ? (
+                                <div className="pointer-events-none absolute left-1/2 top-full mt-0.5 -translate-x-1/2 whitespace-nowrap rounded border border-zinc-700/70 bg-zinc-950/85 px-1 py-px text-[10px] text-zinc-200">
+                                  {entry.tokenLabel?.trim() || entry.name}
+                                </div>
+                              ) : null}
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                </div>
+              </div>
+              {movementSelectionEnabled && pendingCombatMoveDestination && activeCombatGridPosition ? (
+                <div className="absolute bottom-3 left-3 right-3 z-30 rounded-lg border border-cyan-900/80 bg-cyan-950/80 p-2 text-[11px] text-cyan-100 backdrop-blur-sm">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span>
+                      Move: ({activeCombatGridPosition.x},{activeCombatGridPosition.y}) {"->"} (
+                      {pendingCombatMoveDestination.x},{pendingCombatMoveDestination.y})
+                    </span>
+                    <span>Distance: {pendingCombatMoveDistance} tiles</span>
+                    <span>Speed: {activeCombatSpeedTiles}</span>
+                    <span>Dash: {activeCombatSpeedTiles * 2}</span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-[10px]">
+                    <span className="inline-flex items-center gap-1">
+                      <span className="h-2 w-2 rounded-sm bg-emerald-400/70" />
+                      Move range
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="h-2 w-2 rounded-sm bg-orange-400/70" />
+                      Dash range
+                    </span>
+                    <span className="inline-flex items-center gap-1">
+                      <span className="h-2 w-2 rounded-sm bg-sky-400/70" />
+                      Current tile
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        if (!combatActiveEntry || !pendingCombatMoveDestination) {
+                          return;
+                        }
+                        const actorRef = combatActiveEntry.id ?? combatActiveEntry.name;
+                        if (
+                          typeof combatActiveEntry.gridX !== "number" ||
+                          !Number.isFinite(combatActiveEntry.gridX) ||
+                          typeof combatActiveEntry.gridY !== "number" ||
+                          !Number.isFinite(combatActiveEntry.gridY)
+                        ) {
+                          return;
+                        }
+                        setCommittedCombatMove({
+                          actorRef,
+                          origin: {
+                            x: combatActiveEntry.gridX,
+                            y: combatActiveEntry.gridY,
+                          },
+                          destination: pendingCombatMoveDestination,
+                        });
+                        setCampaign((currentCampaign) => {
+                          if (!currentCampaign) {
+                            return currentCampaign;
+                          }
+                          const currentCombatState =
+                            currentCampaign.combatStateJson ?? DEFAULT_COMBAT_STATE;
+                          return {
+                            ...currentCampaign,
+                            combatStateJson: {
+                              ...currentCombatState,
+                              roster: currentCombatState.roster.map((entry) => {
+                                const entryRef = entry.id ?? entry.name;
+                                if (entryRef !== actorRef) {
+                                  return entry;
+                                }
+                                return {
+                                  ...entry,
+                                  gridX: pendingCombatMoveDestination.x,
+                                  gridY: pendingCombatMoveDestination.y,
+                                };
+                              }),
+                            },
+                          };
+                        });
+                        setPendingCombatMoveDestination(null);
+                        setSelectedMovementActorRef(null);
+                      }}
+                      disabled={!pendingCombatMoveWithinNormal || isSubmittingCombatAction}
+                      className="rounded border border-cyan-400/60 bg-cyan-500/20 px-2 py-1 text-[11px] font-medium text-cyan-100 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Move Set
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void handleCombatEngineSubmit({
+                          kind: "dash",
+                          moveDestination: pendingCombatMoveDestination,
+                          userMessageContent: `Dash to (${pendingCombatMoveDestination.x}, ${pendingCombatMoveDestination.y}).`,
+                        });
+                      }}
+                      disabled={!pendingCombatMoveWithinDash || isSubmittingCombatAction}
+                      className="rounded border border-orange-400/60 bg-orange-500/20 px-2 py-1 text-[11px] font-medium text-orange-100 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      Dash
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setPendingCombatMoveDestination(null)}
+                      className="rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-[11px] text-zinc-300"
+                    >
+                      Clear
+                    </button>
+                    {!pendingCombatMoveWithinNormal && pendingCombatMoveWithinDash ? (
+                      <span className="text-[10px] text-amber-200">
+                        Outside normal speed; use Dash.
+                      </span>
+                    ) : pendingCombatMoveWithinNormal ? (
+                      <span className="text-[10px] text-cyan-200/90">
+                        Move will apply on your next action.
+                      </span>
+                    ) : null}
+                  </div>
+                </div>
+              ) : null}
+              <div className="mt-2 rounded-lg border border-zinc-800 bg-zinc-950/80 p-2">
+                <div className="mb-1 text-[10px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                  Combat Feed
+                </div>
+                <div className="max-h-[8vh] space-y-1 overflow-y-auto text-[11px] text-zinc-300">
+                  {compactCombatLogLines.length > 0 ? (
+                    compactCombatLogLines.map((line, index) => (
+                      <div key={`compact-combat-log-${index}`} className="truncate">
+                        {line}
+                      </div>
+                    ))
+                  ) : (
+                    <div className="text-zinc-500">No combat log entries yet.</div>
+                  )}
+                </div>
+              </div>
+              {showCombatGridTelemetry ? (
+                <div className="mt-1 rounded-md border border-zinc-800/80 bg-zinc-950/60 px-2 py-1 text-[10px] text-zinc-400">
+                  <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                    <span>
+                      Grid: {combatMapTemplate ? `${Math.max(1, combatMapTemplate.gridCols)}x${Math.max(1, combatMapTemplate.gridRows)}` : "--"}
+                    </span>
+                    <span>Tokens: {combatMapTokens.length}</span>
+                    <span>Blocked: {combatMapBlockedSet.size}</span>
+                    <span>Zoom: {combatMapZoomPercent}%</span>
+                    <span>
+                      Pan: {combatMapPanOffset.x},{combatMapPanOffset.y}
+                    </span>
+                    <span>
+                      Toggles: {showCombatGrid ? "grid" : "no-grid"} | {showCombatBlockedTiles ? "blocked" : "no-blocked"} | {showCombatTokenLabels ? "names" : "no-names"} | {showCombatTokenBadges ? "badges" : "no-badges"}
+                    </span>
+                  </div>
+                  <div className="mt-0.5 truncate">
+                    Template: {combatMapTemplate?.title ?? "none"} ({combatState.mapTemplateLocationKey ?? combatMapTemplate?.locationKey ?? "unknown"})
+                  </div>
+                </div>
+              ) : null}
+            </section>
+          )}
 
-          <form onSubmit={handleSubmit} onKeyDown={handleCombatControlsKeyDown} className="mt-2 space-y-2">
+          {!engineCombatUiLocked ? (
+            <>
+              <div
+                ref={chatScrollContainerRef}
+                onScroll={(event) => {
+                  if (!followChatLive) {
+                    return;
+                  }
+                  const node = event.currentTarget;
+                  const distanceFromBottom =
+                    node.scrollHeight - node.scrollTop - node.clientHeight;
+                  setChatAutoScrollPaused(distanceFromBottom > 72);
+                }}
+                className="h-[50vh] overflow-y-auto rounded-xl border border-zinc-800 bg-zinc-950 p-3 space-y-3"
+              >
+                {messages.map((msg, index) => (
+                  (() => {
+                    const bubbleStyles = getMessageBubbleStyles(msg, companionColorMap);
+                    return (
+                  <div
+                    key={msg.id ?? `${msg.role}-${index}`}
+                    className={`rounded-xl border p-3 ${bubbleStyles.containerClass}`}
+                  >
+                    <div
+                      className={`mb-1 text-xs uppercase tracking-[0.16em] ${bubbleStyles.labelClass}`}
+                    >
+                      {msg.speakerName}
+                    </div>
+                    <MessageBody
+                      role={msg.role}
+                      content={msg.content}
+                      suppressChoiceList={
+                        msg.role === "gm" &&
+                        (engineCombatUiLocked ||
+                          (engineCombatModeEnabled &&
+                            /\b(?:combat\s+begins?|combat\s+is\s+now\s+active|combat\s+active|initiative)\b/i.test(
+                              msg.content,
+                            )))
+                      }
+                    />
+                  </div>
+                    );
+                  })()
+                ))}
+
+                {loading && (
+                  <div className="rounded-xl border border-zinc-800 bg-zinc-900 p-3 text-zinc-400">
+                    GM is thinking...
+                  </div>
+                )}
+              </div>
+              <div className="mt-2 flex h-5 items-center justify-between gap-2 text-[11px] text-zinc-400">
+                <label className="inline-flex items-center gap-2 whitespace-nowrap">
+                  <input
+                    type="checkbox"
+                    checked={followChatLive}
+                    onChange={(event) => {
+                      setFollowChatLive(event.target.checked);
+                      if (event.target.checked) {
+                        setChatAutoScrollPaused(false);
+                        const node = chatScrollContainerRef.current;
+                        if (node) {
+                          node.scrollTop = node.scrollHeight;
+                        }
+                      }
+                    }}
+                  />
+                  Follow latest chat
+                </label>
+                {followChatLive && chatAutoScrollPaused ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setChatAutoScrollPaused(false);
+                      const node = chatScrollContainerRef.current;
+                      if (node) {
+                        node.scrollTop = node.scrollHeight;
+                      }
+                    }}
+                    className="h-5 shrink-0 whitespace-nowrap rounded-md border border-zinc-700 bg-zinc-900 px-2 text-[11px] text-zinc-200 transition hover:border-zinc-500"
+                  >
+                    Jump to latest
+                  </button>
+                ) : null}
+              </div>
+            </>
+          ) : null}
+
+          <form
+            onSubmit={handleSubmit}
+            onKeyDown={handleCombatControlsKeyDown}
+            className={`${engineCombatUiLocked ? "mt-1 space-y-1.5" : "mt-2 space-y-2"}`}
+          >
             {false && engineCombatUiLocked ? (
               <div className="rounded-xl border border-cyan-500/30 bg-cyan-500/10 p-2.5">
                 <div className="mb-1.5 flex flex-wrap items-center justify-between gap-1.5">
@@ -4944,6 +6806,7 @@ export default function CampaignPage() {
                         handleCombatEngineSubmit({
                           kind: combatActionKind,
                           targetRef: combatActionTargetRef,
+                          moveDestination: pendingCombatMoveDestination ?? undefined,
                         })
                       }
                       disabled={Boolean(combatSubmitDisabledReason)}
@@ -5054,12 +6917,20 @@ export default function CampaignPage() {
                       ) : combatLegalTargets.length === 0 ? (
                         <option value="">No valid targets</option>
                       ) : (
-                        combatLegalTargets.map((entry) => (
-                          <option key={entry.id ?? entry.name} value={entry.id ?? entry.name}>
+                        <option value="">Select target...</option>
+                      )}
+                      {combatActionKind === "attack" || combatActionKind === "cast-spell"
+                        ? combatLegalTargets.length > 0 &&
+                        combatLegalTargets.map((entry, index) => (
+                          <option
+                            key={`${entry.id ?? entry.name}-${index}`}
+                            value={entry.id ?? entry.name}
+                            disabled={!combatValidTargetRefSet.has(entry.id ?? entry.name)}
+                          >
                             {entry.name} {entry.hp ? `(${entry.hp})` : ""}
                           </option>
                         ))
-                      )}
+                        : null}
                     </select>
                   </div>
                   <div className="rounded-lg border border-zinc-700 bg-zinc-950/70 p-1.5">
@@ -5145,6 +7016,9 @@ export default function CampaignPage() {
                     Resolving companion/enemy turns...
                   </p>
                 ) : null}
+                {debugStateLoggingEnabled ? (
+                  <p className="mt-1 text-[10px] text-zinc-400">{combatCheckpointStatusText}</p>
+                ) : null}
 
                 {lastCombatResolution ? (
                   <div className="mt-2 rounded-lg border border-zinc-700 bg-zinc-950/70 p-2">
@@ -5226,28 +7100,30 @@ export default function CampaignPage() {
 
             <div className="flex items-center justify-between gap-3">
               <div className="flex items-center gap-3">
-                <button
-                  type="submit"
-                  disabled={
-                    loading || !input.trim() || isChatLocked || engineCombatUiLocked
-                  }
-                  className="rounded-xl bg-zinc-100 px-4 py-2 font-medium text-zinc-900 disabled:opacity-50"
-                >
-                  {engineCombatUiLocked ? "Combat Mode" : "Send"}
-                </button>
-                <button
-                  type="button"
-                  onClick={handleUndoLastTurn}
-                  disabled={loading || isUndoingTurn || !canUndoLastTurn}
-                  className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
-                >
-                  {isUndoingTurn ? "Undoing..." : "Undo"}
-                </button>
+                {!engineCombatUiLocked ? (
+                  <button
+                    type="submit"
+                    disabled={loading || !input.trim() || isChatLocked}
+                    className="rounded-xl bg-zinc-100 px-4 py-2 font-medium text-zinc-900 disabled:opacity-50"
+                  >
+                    Send
+                  </button>
+                ) : null}
+                {!engineCombatUiLocked ? (
+                  <button
+                    type="button"
+                    onClick={handleUndoLastTurn}
+                    disabled={loading || isUndoingTurn || !canUndoLastTurn}
+                    className="rounded-xl border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm font-medium text-zinc-200 transition hover:border-zinc-500 hover:text-white disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {isUndoingTurn ? "Undoing..." : "Undo"}
+                  </button>
+                ) : null}
                 {error ? <p className="text-sm text-red-400">{error}</p> : null}
               </div>
 
-              <div className="relative flex items-center gap-2">
-                <span className="text-xs text-zinc-500">ID: {campaignId}</span>
+              {!engineCombatUiLocked ? (
+                <div className="relative flex items-center gap-2">
                 {campaign ? (
                   <>
                     <button
@@ -5332,6 +7208,29 @@ export default function CampaignPage() {
                           ) : null}
                           <div className="px-3 py-2">
                             <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
+                              Combat Token Size
+                            </label>
+                            <div className="flex items-center gap-2">
+                              <input
+                                type="range"
+                                min={50}
+                                max={250}
+                                step={5}
+                                value={combatMapTokenScalePercent}
+                                onChange={(event) =>
+                                  handleSetCombatMapTokenScalePercent(
+                                    Number(event.target.value),
+                                  )
+                                }
+                                className="w-full accent-cyan-300"
+                              />
+                              <span className="w-11 text-right text-xs text-zinc-300">
+                                {combatMapTokenScalePercent}%
+                              </span>
+                            </div>
+                          </div>
+                          <div className="px-3 py-2">
+                            <label className="mb-1 block text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">
                               Narration
                             </label>
                             <select
@@ -5399,12 +7298,16 @@ export default function CampaignPage() {
                               DEV: Clear Main Character
                             </button>
                           ) : null}
+                          <div className="px-3 pb-1 pt-2 text-[10px] text-zinc-500">
+                            ID: {campaignId}
+                          </div>
                         </div>
                       </div>
                     ) : null}
                   </>
                 ) : null}
-              </div>
+                </div>
+              ) : null}
             </div>
           </form>
         </section>
@@ -5477,16 +7380,31 @@ export default function CampaignPage() {
                       </p>
                       <button
                         type="button"
-                        onClick={() =>
-                          handleCombatEngineSubmit({
+                        onClick={() => {
+                          if (showCombatRoundStartButton) {
+                            void handleStartCombatRound();
+                            return;
+                          }
+                          void handleCombatEngineSubmit({
                             kind: combatActionKind,
                             targetRef: combatActionTargetRef,
-                          })
+                            moveDestination: pendingCombatMoveDestination ?? undefined,
+                          });
+                        }}
+                        disabled={
+                          showCombatRoundStartButton
+                            ? isAutoResolvingCombat || isSubmittingCombatAction || loading
+                            : Boolean(combatSubmitDisabledReason)
                         }
-                        disabled={Boolean(combatSubmitDisabledReason)}
                         className="rounded-xl border border-emerald-300/60 bg-emerald-300/25 px-2.5 py-1 text-[11px] font-semibold text-emerald-50 transition hover:border-emerald-200 hover:bg-emerald-300/35 disabled:cursor-not-allowed disabled:opacity-60"
                       >
-                        {isSubmittingCombatAction ? "Resolving..." : "Confirm"}
+                        {showCombatRoundStartButton
+                          ? isAutoResolvingCombat
+                            ? "Starting..."
+                            : "Start"
+                          : isSubmittingCombatAction
+                            ? "Resolving..."
+                            : "Confirm"}
                       </button>
                     </div>
                     <div className="rounded-md border border-cyan-400/30 bg-cyan-400/10 px-1.5 py-0.5 text-[10px] text-cyan-100/90">
@@ -5546,12 +7464,20 @@ export default function CampaignPage() {
                       ) : combatLegalTargets.length === 0 ? (
                         <option value="">No valid targets</option>
                       ) : (
-                        combatLegalTargets.map((entry) => (
-                          <option key={entry.id ?? entry.name} value={entry.id ?? entry.name}>
+                        <option value="">Select target...</option>
+                      )}
+                      {combatActionKind === "attack" || combatActionKind === "cast-spell"
+                        ? combatLegalTargets.length > 0 &&
+                        combatLegalTargets.map((entry, index) => (
+                          <option
+                            key={`${entry.id ?? entry.name}-${index}`}
+                            value={entry.id ?? entry.name}
+                            disabled={!combatValidTargetRefSet.has(entry.id ?? entry.name)}
+                          >
                             {entry.name} {entry.hp ? `(${entry.hp})` : ""}
                           </option>
                         ))
-                      )}
+                        : null}
                     </select>
                     <select
                       value={combatAttackPresetId}
@@ -5608,6 +7534,9 @@ export default function CampaignPage() {
                   <p className="mt-1 text-[11px] text-zinc-300">
                     {selectedActionRulePreview ?? "No preview available."}
                   </p>
+                  {debugStateLoggingEnabled ? (
+                    <p className="mt-1 text-[10px] text-zinc-400">{combatCheckpointStatusText}</p>
+                  ) : null}
                 </div>
               ) : null}
               <div
@@ -5622,7 +7551,7 @@ export default function CampaignPage() {
               {combatActive && !detailCardId ? (
                 <div className="space-y-2 text-xs text-zinc-300">
                   <div className="rounded-xl border border-red-400/20 bg-red-400/5 px-3 py-2 text-[11px] uppercase tracking-[0.14em] text-red-200/90">
-                    Combat Round {combatState.round}
+                    <span>Combat Round {combatState.round}</span>
                   </div>
                   {initiativeOrderedCombatRoster.map(({ entry }, index) => {
                     const linkedCharacter =
@@ -10988,6 +12917,33 @@ function formatSignedBonus(value: number) {
   return value >= 0 ? `+${value}` : String(value);
 }
 
+function inferAttackRangeModeFromPreset(preset: AttackActionPreset): AttackRangeMode {
+  if (preset.category !== "weapon") {
+    return "ranged";
+  }
+  const label = `${preset.label} ${preset.spellName ?? ""}`.trim().toLowerCase();
+  const rangedHints = [
+    "bow",
+    "crossbow",
+    "sling",
+    "rifle",
+    "musket",
+    "revolver",
+    "pistol",
+    "shotgun",
+    "gun",
+    "longarm",
+    "carbine",
+    "thrown",
+    "javelin",
+    "dart",
+  ];
+  if (rangedHints.some((hint) => label.includes(hint))) {
+    return "ranged";
+  }
+  return "melee";
+}
+
 function getCombatActionOptionsForRuleset(ruleset: string) {
   const normalized = ruleset.trim().toLowerCase();
   if (normalized.includes("deadlands")) {
@@ -11048,7 +13004,7 @@ function getAvailableSpellSlotLevels(sheetJson: Record<string, unknown> | null) 
     .map(([slot]) => slot);
 }
 
-  function chooseAutoEngineActionForCombatant(params: {
+function chooseAutoEngineActionForCombatant(params: {
   actorEntry: CombatRosterEntry;
   actorCharacter: CampaignCharacter | null;
   targetEntry: CombatRosterEntry | null;
@@ -11061,6 +13017,8 @@ function getAvailableSpellSlotLevels(sheetJson: Record<string, unknown> | null) 
     return {
       kind: "attack" as CombatActionKind,
       attackPresetId: "basic",
+      attackRangeMode: undefined as AttackRangeMode | undefined,
+      moveDestination: undefined as { x: number; y: number } | undefined,
       attackBonus: undefined as number | undefined,
       damageDie: undefined as number | undefined,
       damageBonus: undefined as number | undefined,
@@ -11079,6 +13037,8 @@ function getAvailableSpellSlotLevels(sheetJson: Record<string, unknown> | null) 
     return {
       kind: "pass" as CombatActionKind,
       attackPresetId: "basic",
+      attackRangeMode: undefined as AttackRangeMode | undefined,
+      moveDestination: undefined as { x: number; y: number } | undefined,
       attackBonus: undefined as number | undefined,
       damageDie: undefined as number | undefined,
       damageBonus: undefined as number | undefined,
@@ -11099,6 +13059,8 @@ function getAvailableSpellSlotLevels(sheetJson: Record<string, unknown> | null) 
     return {
       kind: "cast-spell" as CombatActionKind,
       attackPresetId: spellPreset.id,
+      attackRangeMode: undefined as AttackRangeMode | undefined,
+      moveDestination: undefined as { x: number; y: number } | undefined,
       attackBonus: spellPreset.attackBonus,
       damageDie: spellPreset.damageDie,
       damageBonus: spellPreset.damageBonus,
@@ -11110,6 +13072,8 @@ function getAvailableSpellSlotLevels(sheetJson: Record<string, unknown> | null) 
   return {
     kind: "attack" as CombatActionKind,
     attackPresetId: weaponPreset?.id ?? "basic",
+    attackRangeMode: undefined as AttackRangeMode | undefined,
+    moveDestination: undefined as { x: number; y: number } | undefined,
     attackBonus: weaponPreset?.attackBonus,
     damageDie: weaponPreset?.damageDie,
     damageBonus: weaponPreset?.damageBonus,
@@ -11289,6 +13253,199 @@ function findCombatTargetFromRef(targetRef: string, combatState: CombatState) {
   return preferredTargets[0] ?? null;
 }
 
+function getGridTileDistance(
+  from: { x: number; y: number },
+  to: { x: number; y: number },
+) {
+  return Math.max(Math.abs(to.x - from.x), Math.abs(to.y - from.y));
+}
+
+function getCombatantFootprintCols(entry: Pick<CombatRosterEntry, "tokenFootprintCols">) {
+  if (
+    typeof entry.tokenFootprintCols === "number" &&
+    Number.isFinite(entry.tokenFootprintCols)
+  ) {
+    return Math.max(1, Math.min(6, Math.trunc(entry.tokenFootprintCols)));
+  }
+  return 1;
+}
+
+function getCombatantFootprintRows(entry: Pick<CombatRosterEntry, "tokenFootprintRows">) {
+  if (
+    typeof entry.tokenFootprintRows === "number" &&
+    Number.isFinite(entry.tokenFootprintRows)
+  ) {
+    return Math.max(1, Math.min(6, Math.trunc(entry.tokenFootprintRows)));
+  }
+  return 1;
+}
+
+function getCombatantOccupiedTileKeys(
+  entry: Pick<
+    CombatRosterEntry,
+    "gridX" | "gridY" | "tokenFootprintCols" | "tokenFootprintRows"
+  >,
+) {
+  if (
+    typeof entry.gridX !== "number" ||
+    !Number.isFinite(entry.gridX) ||
+    typeof entry.gridY !== "number" ||
+    !Number.isFinite(entry.gridY)
+  ) {
+    return [] as string[];
+  }
+  const cols = getCombatantFootprintCols(entry);
+  const rows = getCombatantFootprintRows(entry);
+  const occupied: string[] = [];
+  for (let dx = 0; dx < cols; dx += 1) {
+    for (let dy = 0; dy < rows; dy += 1) {
+      occupied.push(`${entry.gridX + dx},${entry.gridY + dy}`);
+    }
+  }
+  return occupied;
+}
+
+function getMinimumTileDistanceBetweenCombatants(
+  actor: Pick<CombatRosterEntry, "gridX" | "gridY" | "tokenFootprintCols" | "tokenFootprintRows">,
+  target: Pick<CombatRosterEntry, "gridX" | "gridY" | "tokenFootprintCols" | "tokenFootprintRows">,
+) {
+  const actorKeys = getCombatantOccupiedTileKeys(actor)
+    .map((key) => {
+      const [xRaw, yRaw] = key.split(",");
+      const x = Number(xRaw);
+      const y = Number(yRaw);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return null;
+      }
+      return { x: Math.trunc(x), y: Math.trunc(y) };
+    })
+    .filter((entry): entry is { x: number; y: number } => Boolean(entry));
+  const targetKeys = getCombatantOccupiedTileKeys(target)
+    .map((key) => {
+      const [xRaw, yRaw] = key.split(",");
+      const x = Number(xRaw);
+      const y = Number(yRaw);
+      if (!Number.isFinite(x) || !Number.isFinite(y)) {
+        return null;
+      }
+      return { x: Math.trunc(x), y: Math.trunc(y) };
+    })
+    .filter((entry): entry is { x: number; y: number } => Boolean(entry));
+  if (actorKeys.length === 0 || targetKeys.length === 0) {
+    return Number.POSITIVE_INFINITY;
+  }
+  let minimumDistance = Number.POSITIVE_INFINITY;
+  for (const actorKey of actorKeys) {
+    for (const targetKey of targetKeys) {
+      minimumDistance = Math.min(
+        minimumDistance,
+        getGridTileDistance(actorKey, targetKey),
+      );
+    }
+  }
+  return minimumDistance;
+}
+
+function getCombatantCenterPx(
+  entry: Pick<CombatRosterEntry, "gridX" | "gridY" | "tokenFootprintCols" | "tokenFootprintRows">,
+) {
+  if (
+    typeof entry.gridX !== "number" ||
+    !Number.isFinite(entry.gridX) ||
+    typeof entry.gridY !== "number" ||
+    !Number.isFinite(entry.gridY)
+  ) {
+    return null;
+  }
+  const cols = getCombatantFootprintCols(entry);
+  const rows = getCombatantFootprintRows(entry);
+  return {
+    x: (entry.gridX + cols / 2) * 48,
+    y: (entry.gridY + rows / 2) * 48 - 2,
+  };
+}
+
+function hasBlockedTilesOnLineOfSightClient(params: {
+  actor: Pick<CombatRosterEntry, "gridX" | "gridY" | "tokenFootprintCols" | "tokenFootprintRows">;
+  target: Pick<CombatRosterEntry, "gridX" | "gridY" | "tokenFootprintCols" | "tokenFootprintRows">;
+  blockedTileSet: Set<string>;
+}) {
+  if (params.blockedTileSet.size === 0) {
+    return false;
+  }
+  const actorCenter = getCombatantCenterPx(params.actor);
+  const targetCenter = getCombatantCenterPx(params.target);
+  if (!actorCenter || !targetCenter) {
+    return false;
+  }
+  const actorOccupied = new Set(getCombatantOccupiedTileKeys(params.actor));
+  const targetOccupied = new Set(getCombatantOccupiedTileKeys(params.target));
+  const steps = Math.max(
+    1,
+    Math.ceil(
+      Math.max(
+        Math.abs(targetCenter.x - actorCenter.x),
+        Math.abs(targetCenter.y - actorCenter.y),
+      ) / 12,
+    ),
+  );
+  const visitedTiles = new Set<string>();
+  for (let step = 0; step <= steps; step += 1) {
+    const progress = step / steps;
+    const sampleX = actorCenter.x + (targetCenter.x - actorCenter.x) * progress;
+    const sampleY = actorCenter.y + (targetCenter.y - actorCenter.y) * progress;
+    const tileKey = `${Math.floor(sampleX / 48)},${Math.floor(sampleY / 48)}`;
+    if (visitedTiles.has(tileKey)) {
+      continue;
+    }
+    visitedTiles.add(tileKey);
+    if (actorOccupied.has(tileKey) || targetOccupied.has(tileKey)) {
+      continue;
+    }
+    if (params.blockedTileSet.has(tileKey)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+function getCombatMovementTilesPerMove(
+  ruleset: string,
+  sheetJson: Record<string, unknown> | null,
+) {
+  const normalizedRuleset = ruleset.trim().toLowerCase();
+  if (!normalizedRuleset.includes("d&d")) {
+    return 6;
+  }
+
+  const speedCandidates = [
+    sheetJson?.speed,
+    (sheetJson?.movement as Record<string, unknown> | undefined)?.speed,
+    (sheetJson?.stats as Record<string, unknown> | undefined)?.speed,
+    (sheetJson?.derivedStats as Record<string, unknown> | undefined)?.speed,
+  ];
+  for (const candidate of speedCandidates) {
+    if (typeof candidate === "number" && Number.isFinite(candidate)) {
+      return Math.max(1, Math.floor(Math.max(5, candidate) / 5));
+    }
+    if (typeof candidate === "string" && candidate.trim()) {
+      const parsed = Number.parseFloat(candidate);
+      if (Number.isFinite(parsed)) {
+        return Math.max(1, Math.floor(Math.max(5, parsed) / 5));
+      }
+      const match = candidate.match(/(\d+)/);
+      if (match) {
+        const numeric = Number(match[1]);
+        if (Number.isFinite(numeric)) {
+          return Math.max(1, Math.floor(Math.max(5, numeric) / 5));
+        }
+      }
+    }
+  }
+
+  return 6;
+}
+
 function isCombatHpDepleted(value: string | undefined) {
   if (!value) {
     return false;
@@ -11330,6 +13487,74 @@ function isCombatantDefeated(entry: CombatRosterEntry) {
     /\b0\s*hp\b/.test(summary) ||
     /\b(defeated|dead|down|unconscious|slain|killed|collapsed)\b/.test(summary)
   );
+}
+
+function getCombatTokenBadgeText(entry: CombatRosterEntry) {
+  if (entry.hp && entry.hp.trim()) {
+    return entry.hp.trim();
+  }
+
+  const summary = (entry.summary ?? "").trim();
+  if (!summary) {
+    return "";
+  }
+
+  const woundsMatch = summary.match(/\bwounds?\s*:?\s*(\d+\s*\/\s*\d+)/i);
+  if (woundsMatch?.[1]) {
+    return `W ${woundsMatch[1].replace(/\s+/g, "")}`;
+  }
+
+  const hpMatch = summary.match(/\bhp\s*:?\s*(\d+\s*\/\s*\d+)/i);
+  if (hpMatch?.[1]) {
+    return `HP ${hpMatch[1].replace(/\s+/g, "")}`;
+  }
+
+  return "";
+}
+
+function getCombatTokenImageSource(entry: CombatRosterEntry) {
+  const value = entry.tokenImageDataUrl;
+  if (typeof value !== "string") {
+    return "";
+  }
+  const trimmed = value.trim();
+  if (!trimmed) {
+    return "";
+  }
+  if (
+    trimmed.startsWith("data:image/") ||
+    trimmed.startsWith("http://") ||
+    trimmed.startsWith("https://") ||
+    trimmed.startsWith("/")
+  ) {
+    return trimmed;
+  }
+  return "";
+}
+
+function getCombatTokenInitials(name: string) {
+  const tokens = name
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean);
+  if (tokens.length === 0) {
+    return "?";
+  }
+  if (tokens.length === 1) {
+    return tokens[0].slice(0, 2).toUpperCase();
+  }
+  return `${tokens[0][0] ?? ""}${tokens[1][0] ?? ""}`.toUpperCase();
+}
+
+function getCombatTokenScalePercent(entry: CombatRosterEntry, baseScalePercent: number) {
+  const normalizedSize = (entry.creatureSize ?? "").trim().toLowerCase();
+  if (normalizedSize.startsWith("tiny") || normalizedSize === "t") {
+    return Math.round(baseScalePercent * 0.5);
+  }
+  if (normalizedSize.startsWith("small") || normalizedSize === "s") {
+    return Math.round(baseScalePercent * (2 / 3));
+  }
+  return baseScalePercent;
 }
 
 function buildCombatResolutionNarration(resolution: {
@@ -12891,5 +15116,6 @@ function getThreatBadgeClass(threat: string) {
 
   return "bg-lime-500/15 text-lime-200 ring-1 ring-lime-400/20";
 }
+
 
 

@@ -5,6 +5,8 @@ export type EncounterStartCombatantSeed = {
   id?: string;
   name: string;
   type: "character" | "enemy" | "npc";
+  creatureSlug?: string;
+  creatureSize?: string;
   summary?: string;
   hp?: string;
   statusEffects?: string[];
@@ -32,6 +34,7 @@ export type EncounterResolutionDebug = {
   averageLevel: number;
   averageResourceRatio: number;
   difficultyMode: string;
+  encounterIntent: string;
   variance: string;
   enemyCountExisting: number;
   enemyCountTarget: number;
@@ -212,9 +215,74 @@ function normalizeNameKey(value: string) {
   return value.trim().toLowerCase();
 }
 
+function stripEnemySerialSuffix(value: string) {
+  return value.trim().replace(/\s*(?:#\s*)?\d+$/i, "").trim();
+}
+
+function deriveCreatureSlugCandidate(value: string) {
+  return stripEnemySerialSuffix(value)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+}
+
+function findTemplateForEnemySeed(
+  templates: CampaignBootstrap["world_roster"]["enemyTemplates"],
+  seed: EncounterStartCombatantSeed,
+) {
+  const enemyName = normalizeNameKey(stripEnemySerialSuffix(seed.name));
+  const enemySlug = normalizeNameKey(seed.creatureSlug ?? "");
+  return (
+    templates.find((template) => {
+      const templateName = normalizeNameKey(template.name);
+      const templateSlug = normalizeNameKey(deriveCreatureSlugCandidate(template.name));
+      if (enemySlug && (enemySlug === templateSlug || enemySlug.endsWith(`_${templateSlug}`))) {
+        return true;
+      }
+      if (!enemyName) {
+        return false;
+      }
+      return enemyName.includes(templateName) || templateName.includes(enemyName);
+    }) ?? null
+  );
+}
+
 function isPriorityEnemyName(name: string) {
   const normalized = normalizeNameKey(name);
   return /(lieutenant|captain|boss|leader|chief|warlord|marshal)/.test(normalized);
+}
+
+function inferEncounterContextTag(startingScene: string) {
+  const text = normalizeNameKey(startingScene);
+  if (/(grave|graveyard|cemetery|crypt|tomb|catacomb)/.test(text)) {
+    return "hideout";
+  }
+  if (/(forest|woods|trail|path|road|clearing)/.test(text)) {
+    return "road";
+  }
+  if (/(city|street|town|market|district|tavern|saloon)/.test(text)) {
+    return "town";
+  }
+  if (/(ruin|sewer|cave|mine|hideout)/.test(text)) {
+    return "hideout";
+  }
+  return "road";
+}
+
+function pickEncounterTable(
+  bootstrap: CampaignBootstrap,
+  averageLevel: number,
+) {
+  const contextTag = inferEncounterContextTag(bootstrap.campaign.starting_scene);
+  const candidates = bootstrap.world_roster.encounterTables.filter(
+    (entry) =>
+      averageLevel >= entry.levelBand.min - 1 &&
+      averageLevel <= entry.levelBand.max + 1,
+  );
+  const contextMatch = candidates.find(
+    (entry) => normalizeNameKey(entry.contextTag) === contextTag,
+  );
+  return contextMatch ?? candidates[0] ?? null;
 }
 
 export function resolveEncounterStart(input: EncounterResolverInput): EncounterResolverOutput {
@@ -238,12 +306,19 @@ export function resolveEncounterStart(input: EncounterResolverInput): EncounterR
       averageLevel <= template.levelBand.max + 2,
   );
   const templatePool = templates.length > 0 ? templates : input.bootstrap.world_roster.enemyTemplates;
+  const encounterTable = pickEncounterTable(input.bootstrap, averageLevel);
+  const tableTemplateIds = new Set(encounterTable?.templateIds ?? []);
+  const tableTemplatePool = templatePool.filter((entry) => tableTemplateIds.has(entry.id));
+  const effectiveTemplatePool =
+    tableTemplatePool.length > 0 ? tableTemplatePool : templatePool;
   const rng = createDeterministicRng(input.seedInput);
 
   const existingEnemies = input.combatants.filter((entry) => entry.type === "enemy");
   const enemyNameSet = new Set(input.combatants.map((entry) => normalizeNameKey(entry.name)));
   const difficultyMultiplier =
     config.difficultyMode === "deadly" ? 1.25 : config.difficultyMode === "cinematic" ? 0.8 : 1;
+  const intentCountMultiplier =
+    config.encounterIntent === "easy" ? 0.85 : config.encounterIntent === "hard" ? 1.2 : 1;
   const rulesetDensityFactor = isDeadlandsRuleset(input.ruleset)
     ? averageLevel <= 2
       ? 0.6
@@ -263,34 +338,66 @@ export function resolveEncounterStart(input: EncounterResolverInput): EncounterR
           : 1;
   const levelBonus = Math.floor(Math.max(0, averageLevel - 1) / 4);
   const resourceAdjustment = averageResourceRatio < 0.55 ? -1 : 0;
-  const targetEnemyCount = clamp(
+  let targetEnemyCount = clamp(
     Math.round(
-      partySize * difficultyMultiplier * rulesetDensityFactor +
+      partySize * difficultyMultiplier * intentCountMultiplier * rulesetDensityFactor +
         levelBonus +
         resourceAdjustment,
     ),
     config.minOpponents,
     config.maxOpponents,
   );
+  if (config.encounterIntent === "easy") {
+    targetEnemyCount = Math.max(config.minOpponents, Math.min(targetEnemyCount, Math.max(2, Math.min(3, partySize))));
+  } else if (config.encounterIntent === "standard") {
+    targetEnemyCount = Math.max(config.minOpponents, Math.min(targetEnemyCount, Math.max(3, Math.min(4, partySize + 1))));
+  }
+  if (
+    input.adapterProfile === "dnd" &&
+    config.difficultyMode === "standard" &&
+    averageLevel <= 2
+  ) {
+    const lowLevelCap = clamp(Math.max(3, Math.min(4, partySize)), config.minOpponents, config.maxOpponents);
+    targetEnemyCount = Math.min(targetEnemyCount, lowLevelCap);
+    if (existingEnemies.length >= 3) {
+      targetEnemyCount = Math.min(targetEnemyCount, existingEnemies.length);
+    }
+  }
 
   const enhancedCombatants: EncounterStartCombatantSeed[] = input.combatants.map((entry) => {
     if (entry.type !== "enemy") {
       return entry;
     }
 
+    const matchedTemplate =
+      effectiveTemplatePool.find((template) =>
+        normalizeNameKey(entry.name).includes(normalizeNameKey(template.name)),
+      ) ??
+      effectiveTemplatePool[Math.floor(rng() * Math.max(1, effectiveTemplatePool.length))];
+    const resolvedCreatureSlug =
+      typeof entry.creatureSlug === "string" && entry.creatureSlug.trim()
+        ? entry.creatureSlug.trim()
+        : deriveCreatureSlugCandidate(entry.name) ||
+          deriveCreatureSlugCandidate(matchedTemplate?.name || "") ||
+          undefined;
+
     if (isNumericHpString(entry.hp)) {
-      return entry;
+      return {
+        ...entry,
+        creatureSlug: resolvedCreatureSlug,
+      };
     }
 
-    const matchedTemplate =
-      templatePool.find((template) => normalizeNameKey(entry.name).includes(normalizeNameKey(template.name))) ??
-      templatePool[Math.floor(rng() * Math.max(1, templatePool.length))];
     if (!matchedTemplate) {
-      return entry;
+      return {
+        ...entry,
+        creatureSlug: resolvedCreatureSlug,
+      };
     }
 
     return {
       ...entry,
+      creatureSlug: resolvedCreatureSlug,
       hp: buildEnemyHpString({
         threat: matchedTemplate.threat,
         difficultyMode: config.difficultyMode,
@@ -350,12 +457,77 @@ export function resolveEncounterStart(input: EncounterResolverInput): EncounterR
 
   const enemiesAfterTrim = enhancedCombatants.filter((entry) => entry.type === "enemy").length;
   const enemiesToAdd = Math.max(0, targetEnemyCount - enemiesAfterTrim);
+  const encounterMatchedTemplateIds = new Set<string>();
+  for (const entry of enhancedCombatants) {
+    if (entry.type !== "enemy") {
+      continue;
+    }
+    const matchedTemplate = findTemplateForEnemySeed(effectiveTemplatePool, entry);
+    if (matchedTemplate) {
+      encounterMatchedTemplateIds.add(matchedTemplate.id);
+    }
+  }
+  const preferredAddTemplatePool = effectiveTemplatePool.filter((template) =>
+    encounterMatchedTemplateIds.has(template.id),
+  );
+  const addTemplatePool =
+    preferredAddTemplatePool.length > 0 ? preferredAddTemplatePool : effectiveTemplatePool;
+  const existingEnemyClonePool = enhancedCombatants.filter(
+    (entry) => entry.type === "enemy",
+  );
   const usedTemplates: string[] = [];
   for (let index = 0; index < enemiesToAdd; index += 1) {
-    if (templatePool.length === 0) {
+    if (existingEnemyClonePool.length > 0) {
+      const sourceEnemy =
+        existingEnemyClonePool[Math.floor(rng() * existingEnemyClonePool.length)];
+      if (sourceEnemy) {
+        const baseName = stripEnemySerialSuffix(sourceEnemy.name) || sourceEnemy.name;
+        let serial = 1;
+        let generatedName = `${baseName} ${serial}`;
+        while (enemyNameSet.has(normalizeNameKey(generatedName))) {
+          serial += 1;
+          generatedName = `${baseName} ${serial}`;
+        }
+        enemyNameSet.add(normalizeNameKey(generatedName));
+        enhancedCombatants.push({
+          ...sourceEnemy,
+          id: undefined,
+          name: generatedName,
+          creatureSlug:
+            sourceEnemy.creatureSlug && sourceEnemy.creatureSlug.trim()
+              ? sourceEnemy.creatureSlug.trim()
+              : deriveCreatureSlugCandidate(baseName) || undefined,
+          statusEffects: [],
+          statusDurations: [],
+        });
+        continue;
+      }
+    }
+    if (addTemplatePool.length === 0) {
       break;
     }
-    const template = templatePool[Math.floor(rng() * templatePool.length)];
+    const roleUsage = new Map<string, number>();
+    for (const entry of enhancedCombatants) {
+      if (entry.type !== "enemy") {
+        continue;
+      }
+      const matched = findTemplateForEnemySeed(addTemplatePool, entry);
+      if (!matched) {
+        continue;
+      }
+      for (const role of matched.roles) {
+        roleUsage.set(role, (roleUsage.get(role) ?? 0) + 1);
+      }
+    }
+    const sortedPool = [...addTemplatePool].sort((left, right) => {
+      const leftScore = left.roles.reduce((sum, role) => sum + (roleUsage.get(role) ?? 0), 0);
+      const rightScore = right.roles.reduce((sum, role) => sum + (roleUsage.get(role) ?? 0), 0);
+      if (leftScore !== rightScore) {
+        return leftScore - rightScore;
+      }
+      return left.threat - right.threat;
+    });
+    const template = sortedPool[Math.floor(rng() * Math.min(2, sortedPool.length))];
     if (!template) {
       break;
     }
@@ -372,6 +544,7 @@ export function resolveEncounterStart(input: EncounterResolverInput): EncounterR
     enhancedCombatants.push({
       name: generatedName,
       type: "enemy",
+      creatureSlug: deriveCreatureSlugCandidate(template.name) || undefined,
       summary: `${template.faction} ${template.roles.join("/")}`.trim(),
       hp: buildEnemyHpString({
         threat: template.threat,
@@ -392,12 +565,13 @@ export function resolveEncounterStart(input: EncounterResolverInput): EncounterR
       averageLevel: Number(averageLevel.toFixed(2)),
       averageResourceRatio: Number(averageResourceRatio.toFixed(2)),
       difficultyMode: config.difficultyMode,
+      encounterIntent: config.encounterIntent,
       variance: config.encounterVariance,
       enemyCountExisting: existingEnemies.length,
       enemyCountTarget: targetEnemyCount,
       enemyCountAdded: enemiesToAdd,
       enemyCountTrimmed: trimmedEnemyCount,
-      templatePoolSize: templatePool.length,
+      templatePoolSize: effectiveTemplatePool.length,
       usedTemplates,
     },
   };

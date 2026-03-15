@@ -49,7 +49,7 @@ export function getSceneImageInstructionTemplate(
     return `Create a dynamic action illustration for a ${engine} campaign that captures one clear cinematic moment.`;
   }
   if (promptType === "character-token") {
-    return "TRUE TOP-DOWN TOKEN. Camera is mounted directly above the miniature (90° overhead), looking straight down. Orthographic / no perspective. No tilt. No horizon.\nThe round base must be a perfect circle (not an ellipse). Square image. Centered.\nThis is a VTT token / flat-lay overhead shot: the miniature should appear foreshortened from above; as seen from directly above (do NOT try to show the face like a portrait).\nOnly one character on one round 32mm base with a clean black rim. Background transparent or flat neutral gray. Top-lit studio lighting ";
+    return "TRUE TOP-DOWN TOKEN. Strict 90° overhead. Orthographic/parallel projection, zero perspective. Camera axis perpendicular to ground plane. No tilt, no horizon. Square image, centered. One character on one round 32mm base with a clean black rim. Base must be a perfect circle. Base fully visible with 5-10% margin; base occupies ~80-85% of frame width. Full miniature visible, head and feet inside the base circle. Background transparent or flat neutral gray. Even top-lit studio lighting. Style: highly detailed hand-painted 3D tabletop miniature, crisp edges, clean shading.";
   }
   return `Create a top-down narrative scene map for a ${engine} campaign, with clear terrain, landmarks, and encounter readability.`;
 }
@@ -59,6 +59,9 @@ export function getSceneImageStyleTemplate(
     | "cinematic-realism"
     | "fantasy-illustration"
     | "stone-base"
+    | "no-scenic-base"
+    | "grass-base"
+    | "dirt-base"
     | "comic-book"
     | "manga"
     | "stylized-3d"
@@ -68,7 +71,16 @@ export function getSceneImageStyleTemplate(
     | "tactical-map",
 ) {
   if (stylePreset === "stone-base") {
-    return "Style: highly detailed painted 3D tabletop miniature (hand-painted mini look), crisp edges, clean shading. Base top surface: weathered stone cobblestones/flagstones, cracked paving stones, drybrushed highlights, scattered grit, a few yellow-green grass tufts.\n\nNegative: isometric, 3/4 view, angled camera, perspective, tilt, low angle, front view, portrait view, eye-level, horizon, dramatic cinematic angle, face-forward, product photo angle, cropped, cut off base, missing base, blurry, lowres, extra limbs, extra fingers, duplicate body, multiple characters, text, watermark, logo ";
+    return "Base top: weathered stone cobblestones/flagstones, cracked paving stones, drybrushed highlights, scattered grit, a few yellow-green grass tufts.\nNegative:\n\"isometric, 3/4 view, angled camera, perspective, tilt, low angle, front view, portrait, readable face, visible eyes, looking at camera, horizon, cinematic angle, cropped, cut off base, missing base, off-center, zoomed-in, zoomed-out, blurry, lowres, extra limbs, extra fingers, duplicate body, multiple characters, text, watermark, logo.\"";
+  }
+  if (stylePreset === "no-scenic-base") {
+    return "Style: highly detailed painted 3D tabletop miniature (hand-painted mini look), crisp edges, clean shading. Prefer NO visible physical base. If unavoidable, use an invisible/flat matte black base with zero terrain detail.\nStrictly no base texture or props: no cobblestones, no flagstones, no cracks, no gravel, no grit, no mud, no dirt, no sand, no grass, no tufts, no leaves, no roots, no skulls, no debris.\nNegative:\nvisible scenic base, textured base, stone base, cobblestone base, dirt base, grassy base, terrain base, isometric, 3/4 view, angled camera, perspective, tilt, low angle, front view, portrait, readable face, visible eyes, looking at camera, horizon, cinematic angle, cropped, cut off base, missing miniature, off-center, zoomed-in, zoomed-out, blurry, lowres, extra limbs, extra fingers, duplicate body, multiple characters, text, watermark, logo.";
+  }
+  if (stylePreset === "grass-base") {
+    return "Style: highly detailed painted 3D tabletop miniature (hand-painted mini look), crisp edges, clean shading. Base top surface: natural short grass, mixed yellow-green tufts, sparse earth patches, subtle drybrush highlights.\nNegative:\nisometric, 3/4 view, angled camera, perspective, tilt, low angle, front view, portrait, readable face, visible eyes, looking at camera, horizon, cinematic angle, cropped, cut off base, missing base, off-center, zoomed-in, zoomed-out, blurry, lowres, extra limbs, extra fingers, duplicate body, multiple characters, text, watermark, logo.";
+  }
+  if (stylePreset === "dirt-base") {
+    return "Style: highly detailed painted 3D tabletop miniature (hand-painted mini look), crisp edges, clean shading. Base top surface: packed dirt and mud texture, scattered pebbles, dry dusty highlights, worn terrain look.\nNegative:\nisometric, 3/4 view, angled camera, perspective, tilt, low angle, front view, portrait, readable face, visible eyes, looking at camera, horizon, cinematic angle, cropped, cut off base, missing base, off-center, zoomed-in, zoomed-out, blurry, lowres, extra limbs, extra fingers, duplicate body, multiple characters, text, watermark, logo.";
   }
   if (stylePreset === "cinematic-realism") {
     return "Cinematic realism, dramatic lighting, natural textures, atmospheric depth, high-detail materials, filmic color grading, sharp focal subject.";

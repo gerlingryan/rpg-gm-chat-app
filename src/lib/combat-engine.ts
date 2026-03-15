@@ -25,6 +25,21 @@ type EngineCombatantSeed = {
   id?: string;
   name: string;
   type: CombatRosterEntry["type"];
+  creatureSlug?: string;
+  creatureSize?: string;
+  armorClass?: number;
+  hpMax?: number;
+  attackBonusOverride?: number;
+  damageDieOverride?: number;
+  damageBonusOverride?: number;
+  moveTilesOverride?: number;
+  gridX?: number;
+  gridY?: number;
+  tokenFootprintCols?: number;
+  tokenFootprintRows?: number;
+  tokenLibraryId?: string;
+  tokenImageDataUrl?: string;
+  tokenLabel?: string;
   summary?: string;
   hp?: string;
   statusEffects?: string[];
@@ -379,8 +394,75 @@ export function buildInitiativeState(params: {
     id: entry.seed.id,
     name: entry.seed.name,
     type: entry.seed.type,
+    creatureSlug:
+      typeof entry.seed.creatureSlug === "string" && entry.seed.creatureSlug.trim()
+        ? entry.seed.creatureSlug.trim()
+        : undefined,
+    creatureSize:
+      typeof entry.seed.creatureSize === "string" && entry.seed.creatureSize.trim()
+        ? entry.seed.creatureSize.trim()
+        : undefined,
+    armorClass:
+      typeof entry.seed.armorClass === "number" && Number.isFinite(entry.seed.armorClass)
+        ? Math.max(1, Math.min(99, Math.trunc(entry.seed.armorClass)))
+        : undefined,
+    hpMax:
+      typeof entry.seed.hpMax === "number" && Number.isFinite(entry.seed.hpMax)
+        ? Math.max(1, Math.min(9999, Math.trunc(entry.seed.hpMax)))
+        : undefined,
+    attackBonusOverride:
+      typeof entry.seed.attackBonusOverride === "number" &&
+      Number.isFinite(entry.seed.attackBonusOverride)
+        ? Math.max(-20, Math.min(50, Math.trunc(entry.seed.attackBonusOverride)))
+        : undefined,
+    damageDieOverride:
+      typeof entry.seed.damageDieOverride === "number" &&
+      Number.isFinite(entry.seed.damageDieOverride)
+        ? Math.max(2, Math.min(100, Math.trunc(entry.seed.damageDieOverride)))
+        : undefined,
+    damageBonusOverride:
+      typeof entry.seed.damageBonusOverride === "number" &&
+      Number.isFinite(entry.seed.damageBonusOverride)
+        ? Math.max(-20, Math.min(100, Math.trunc(entry.seed.damageBonusOverride)))
+        : undefined,
+    moveTilesOverride:
+      typeof entry.seed.moveTilesOverride === "number" &&
+      Number.isFinite(entry.seed.moveTilesOverride)
+        ? Math.max(1, Math.min(50, Math.trunc(entry.seed.moveTilesOverride)))
+        : undefined,
     initiative: entry.total,
     active: index === activeIndex,
+    gridX:
+      typeof entry.seed.gridX === "number" && Number.isFinite(entry.seed.gridX)
+        ? Math.max(0, Math.trunc(entry.seed.gridX))
+        : undefined,
+    gridY:
+      typeof entry.seed.gridY === "number" && Number.isFinite(entry.seed.gridY)
+        ? Math.max(0, Math.trunc(entry.seed.gridY))
+        : undefined,
+    tokenFootprintCols:
+      typeof entry.seed.tokenFootprintCols === "number" &&
+      Number.isFinite(entry.seed.tokenFootprintCols)
+        ? Math.max(1, Math.min(6, Math.trunc(entry.seed.tokenFootprintCols)))
+        : undefined,
+    tokenFootprintRows:
+      typeof entry.seed.tokenFootprintRows === "number" &&
+      Number.isFinite(entry.seed.tokenFootprintRows)
+        ? Math.max(1, Math.min(6, Math.trunc(entry.seed.tokenFootprintRows)))
+        : undefined,
+    tokenLibraryId:
+      typeof entry.seed.tokenLibraryId === "string" && entry.seed.tokenLibraryId.trim()
+        ? entry.seed.tokenLibraryId.trim()
+        : undefined,
+    tokenImageDataUrl:
+      typeof entry.seed.tokenImageDataUrl === "string" &&
+      entry.seed.tokenImageDataUrl.startsWith("data:image/")
+        ? entry.seed.tokenImageDataUrl
+        : undefined,
+    tokenLabel:
+      typeof entry.seed.tokenLabel === "string" && entry.seed.tokenLabel.trim()
+        ? entry.seed.tokenLabel.trim()
+        : undefined,
     summary: entry.seed.summary,
     hp: entry.seed.hp,
     statusEffects: [

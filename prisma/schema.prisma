@@ -65,3 +65,76 @@ model Message {
 
   @@index([campaignId])
 }
+
+model BattleMapTemplate {
+  id               String   @id @default(cuid())
+  ruleset          String
+  locationKey      String
+  title            String
+  imageDataUrl     String?
+  referenceUrl     String?
+  gridCols         Int
+  gridRows         Int
+  tileSizePx       Int      @default(64)
+  blockedTilesJson Json
+  playerSpawnTilesJson Json
+  enemySpawnTilesJson  Json
+  tagsJson         Json?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@index([ruleset, locationKey])
+  @@index([createdAt])
+}
+
+model TokenLibraryEntry {
+  id            String   @id @default(cuid())
+  entityType    String
+  ruleset       String
+  category      String   @default("general")
+  subtype       String?
+  normalizedKey String
+  label         String
+  style         String
+  imageDataUrl  String
+  sourcePrompt  String?
+  approved      Boolean  @default(false)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([ruleset, normalizedKey, style])
+  @@index([entityType, ruleset])
+  @@index([ruleset, category, subtype])
+  @@index([createdAt])
+}
+
+model CreatureLibraryEntry {
+  id               String   @id @default(cuid())
+  ruleset          String
+  source           String   @default("open5e")
+  sourceId         String
+  slug             String
+  name             String
+  aliasesJson      Json?
+  size             String?
+  creatureType     String?
+  subtype          String?
+  alignment        String?
+  acJson           Json?
+  hpFormula        String?
+  hpAvg            Int?
+  speedJson        Json?
+  abilityModsJson  Json?
+  attackProfilesJson Json?
+  cr               String?
+  xpDerived        Int?
+  tagsJson         Json?
+  rawJson          Json
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  @@unique([ruleset, source, sourceId])
+  @@unique([ruleset, slug])
+  @@index([ruleset, creatureType, cr])
+  @@index([name])
+}

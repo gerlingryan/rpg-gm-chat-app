@@ -98,7 +98,7 @@ export default function Home() {
             Jump back into recent adventures, start a new campaign, or manage reusable characters.
           </p>
 
-          <div className="mt-5 grid gap-3 sm:grid-cols-2">
+          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
             <Link
               href="/campaigns/new"
               className="block rounded-3xl border border-emerald-300/25 bg-[linear-gradient(135deg,rgba(16,185,129,0.16),rgba(6,78,59,0.28))] p-3.5 transition hover:border-emerald-300/45 hover:bg-[linear-gradient(135deg,rgba(16,185,129,0.2),rgba(6,78,59,0.34))]"
@@ -120,6 +120,42 @@ export default function Home() {
               </div>
               <p className="mt-1.5 text-xs leading-5 text-cyan-50/90">
                 Build and manage reusable characters for your campaigns.
+              </p>
+            </Link>
+
+            <Link
+              href="/admin/battle-maps"
+              className="block rounded-3xl border border-amber-300/25 bg-[linear-gradient(135deg,rgba(251,191,36,0.12),rgba(120,53,15,0.24))] p-3.5 transition hover:border-amber-300/45 hover:bg-[linear-gradient(135deg,rgba(251,191,36,0.16),rgba(120,53,15,0.3))]"
+            >
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-amber-100/90">
+                Battle Map Studio
+              </div>
+              <p className="mt-1.5 text-xs leading-5 text-amber-50/90">
+                Build tactical battle maps, paint blocked tiles, and test token movement.
+              </p>
+            </Link>
+
+            <Link
+              href="/admin/token-library"
+              className="block rounded-3xl border border-violet-300/25 bg-[linear-gradient(135deg,rgba(167,139,250,0.12),rgba(67,56,202,0.22))] p-3.5 transition hover:border-violet-300/45 hover:bg-[linear-gradient(135deg,rgba(167,139,250,0.16),rgba(67,56,202,0.28))]"
+            >
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-violet-100/90">
+                Token Library
+              </div>
+              <p className="mt-1.5 text-xs leading-5 text-violet-50/90">
+                Generate and cache reusable enemy and character tokens.
+              </p>
+            </Link>
+
+            <Link
+              href="/admin/creature-library"
+              className="block rounded-3xl border border-fuchsia-300/25 bg-[linear-gradient(135deg,rgba(232,121,249,0.12),rgba(126,34,206,0.22))] p-3.5 transition hover:border-fuchsia-300/45 hover:bg-[linear-gradient(135deg,rgba(232,121,249,0.16),rgba(126,34,206,0.28))]"
+            >
+              <div className="text-xs font-semibold uppercase tracking-[0.18em] text-fuchsia-100/90">
+                Creature Library
+              </div>
+              <p className="mt-1.5 text-xs leading-5 text-fuchsia-50/90">
+                Import canonical creature stats for encounter generation and token linking.
               </p>
             </Link>
           </div>

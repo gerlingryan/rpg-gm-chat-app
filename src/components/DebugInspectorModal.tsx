@@ -34,6 +34,7 @@ type AdapterTelemetryLike = {
     averageLevel?: number;
     averageResourceRatio?: number;
     difficultyMode?: string;
+    encounterIntent?: string;
     variance?: string;
     enemyCountExisting?: number;
     enemyCountTarget?: number;
@@ -125,7 +126,7 @@ function renderAdapterSummary(adapterDebug: AdapterTelemetryLike | null) {
       `Enemy Count: existing=${resolver.enemyCountExisting ?? "?"}, target=${resolver.enemyCountTarget ?? "?"}, added=${resolver.enemyCountAdded ?? "?"}`,
     );
     lines.push(
-      `Mode: ${resolver.difficultyMode ?? "?"}/${resolver.variance ?? "?"}, templatePool=${resolver.templatePoolSize ?? "?"}`,
+      `Mode: ${resolver.difficultyMode ?? "?"}/${resolver.variance ?? "?"}/${resolver.encounterIntent ?? "?"}, templatePool=${resolver.templatePoolSize ?? "?"}`,
     );
   }
 
@@ -281,6 +282,7 @@ type EncounterPresetRecommendation = {
   label: string;
   difficultyMode: "cinematic" | "standard" | "deadly";
   encounterVariance: "low" | "medium" | "high";
+  encounterIntent: "easy" | "standard" | "hard";
 };
 
 function getRulesetPresetRecommendations(ruleset: string): EncounterPresetRecommendation[] {
@@ -292,16 +294,19 @@ function getRulesetPresetRecommendations(ruleset: string): EncounterPresetRecomm
         label: "Lv 1-2: standard / low",
         difficultyMode: "standard",
         encounterVariance: "low",
+        encounterIntent: "easy",
       },
       {
         label: "Lv 3-5: standard / medium",
         difficultyMode: "standard",
         encounterVariance: "medium",
+        encounterIntent: "standard",
       },
       {
         label: "Lv 6+: deadly / medium",
         difficultyMode: "deadly",
         encounterVariance: "medium",
+        encounterIntent: "hard",
       },
     ];
   }
@@ -312,16 +317,19 @@ function getRulesetPresetRecommendations(ruleset: string): EncounterPresetRecomm
         label: "Lv 1-2: cinematic / low",
         difficultyMode: "cinematic",
         encounterVariance: "low",
+        encounterIntent: "easy",
       },
       {
         label: "Lv 3-5: standard / low",
         difficultyMode: "standard",
         encounterVariance: "low",
+        encounterIntent: "standard",
       },
       {
         label: "Lv 6+: standard / medium",
         difficultyMode: "standard",
         encounterVariance: "medium",
+        encounterIntent: "hard",
       },
     ];
   }
@@ -332,16 +340,19 @@ function getRulesetPresetRecommendations(ruleset: string): EncounterPresetRecomm
         label: "Lv 1-2: standard / medium",
         difficultyMode: "standard",
         encounterVariance: "medium",
+        encounterIntent: "easy",
       },
       {
         label: "Lv 3-5: standard / medium",
         difficultyMode: "standard",
         encounterVariance: "medium",
+        encounterIntent: "standard",
       },
       {
         label: "Lv 6+: deadly / medium",
         difficultyMode: "deadly",
         encounterVariance: "medium",
+        encounterIntent: "hard",
       },
     ];
   }
@@ -351,16 +362,19 @@ function getRulesetPresetRecommendations(ruleset: string): EncounterPresetRecomm
       label: "Low level: standard / low",
       difficultyMode: "standard",
       encounterVariance: "low",
+      encounterIntent: "easy",
     },
     {
       label: "Mid level: standard / medium",
       difficultyMode: "standard",
       encounterVariance: "medium",
+      encounterIntent: "standard",
     },
     {
       label: "High level: deadly / medium",
       difficultyMode: "deadly",
       encounterVariance: "medium",
+      encounterIntent: "hard",
     },
   ];
 }
@@ -382,6 +396,7 @@ export function DebugInspectorModal(props: {
   onSetCombatGeneration: (params: {
     difficultyMode?: "cinematic" | "standard" | "deadly";
     encounterVariance?: "low" | "medium" | "high";
+    encounterIntent?: "easy" | "standard" | "hard";
   }) => void;
 }) {
   const {
@@ -608,7 +623,8 @@ export function DebugInspectorModal(props: {
                   </div>
                   <div className="text-[11px] text-zinc-400">
                     Current: {debugBootstrapState.hiddenView.combat_generation.difficultyMode}/
-                    {debugBootstrapState.hiddenView.combat_generation.encounterVariance}
+                    {debugBootstrapState.hiddenView.combat_generation.encounterVariance}/
+                    {debugBootstrapState.hiddenView.combat_generation.encounterIntent}
                   </div>
                   <div className="grid gap-1.5 sm:grid-cols-3">
                     {(["cinematic", "standard", "deadly"] as const).map((mode) => (
@@ -636,6 +652,19 @@ export function DebugInspectorModal(props: {
                       </button>
                     ))}
                   </div>
+                  <div className="grid gap-1.5 sm:grid-cols-3">
+                    {(["easy", "standard", "hard"] as const).map((intent) => (
+                      <button
+                        key={`intent-${intent}`}
+                        type="button"
+                        onClick={() => onSetCombatGeneration({ encounterIntent: intent })}
+                        disabled={isApplyingDebugBootstrapAction}
+                        className="rounded-md border border-zinc-700 bg-zinc-900 px-2.5 py-1.5 text-left text-[11px] text-zinc-200 transition hover:border-zinc-500 disabled:cursor-not-allowed disabled:opacity-50"
+                      >
+                        Intent: {intent}
+                      </button>
+                    ))}
+                  </div>
                   <div className="rounded-md border border-zinc-800 bg-zinc-900/50 p-2">
                     <div className="text-[10px] font-semibold uppercase tracking-[0.12em] text-zinc-500">
                       Recommended By Level
@@ -651,6 +680,7 @@ export function DebugInspectorModal(props: {
                             onSetCombatGeneration({
                               difficultyMode: preset.difficultyMode,
                               encounterVariance: preset.encounterVariance,
+                              encounterIntent: preset.encounterIntent,
                             })
                           }
                           disabled={isApplyingDebugBootstrapAction}

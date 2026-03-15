@@ -4,6 +4,22 @@ export type CombatRosterEntry = {
   type: "character" | "enemy" | "npc";
   initiative: number;
   active: boolean;
+  creatureSlug?: string;
+  creatureSize?: string;
+  armorClass?: number;
+  hpMax?: number;
+  attackBonusOverride?: number;
+  damageDieOverride?: number;
+  damageBonusOverride?: number;
+  moveTilesOverride?: number;
+  hasRangedCapability?: boolean;
+  gridX?: number;
+  gridY?: number;
+  tokenFootprintCols?: number;
+  tokenFootprintRows?: number;
+  tokenLibraryId?: string;
+  tokenImageDataUrl?: string;
+  tokenLabel?: string;
   summary?: string;
   hp?: string;
   statusEffects?: string[];
@@ -23,6 +39,16 @@ export type CombatState = {
   round: number;
   turnIndex: number;
   roster: CombatRosterEntry[];
+  mapTemplateId?: string;
+  mapTemplateLocationKey?: string;
+  encounterTotalXp?: number;
+  encounterAdjustedXp?: number;
+  encounterDifficulty?: string;
+  encounterEnemyTotal?: number;
+  encounterThresholdEasy?: number;
+  encounterThresholdMedium?: number;
+  encounterThresholdHard?: number;
+  encounterThresholdDeadly?: number;
 };
 
 export const DEFAULT_COMBAT_STATE: CombatState = {
@@ -59,9 +85,80 @@ function normalizeCombatRosterEntry(value: unknown): CombatRosterEntry | null {
     typeof typedValue.id === "string" && typedValue.id.trim()
       ? typedValue.id.trim()
       : undefined;
+  const creatureSlug =
+    typeof typedValue.creatureSlug === "string" && typedValue.creatureSlug.trim()
+      ? typedValue.creatureSlug.trim()
+      : undefined;
+  const creatureSize =
+    typeof typedValue.creatureSize === "string" && typedValue.creatureSize.trim()
+      ? typedValue.creatureSize.trim()
+      : undefined;
+  const armorClass =
+    typeof typedValue.armorClass === "number" && Number.isFinite(typedValue.armorClass)
+      ? Math.max(1, Math.min(99, Math.trunc(typedValue.armorClass)))
+      : undefined;
+  const hpMax =
+    typeof typedValue.hpMax === "number" && Number.isFinite(typedValue.hpMax)
+      ? Math.max(1, Math.min(9999, Math.trunc(typedValue.hpMax)))
+      : undefined;
+  const attackBonusOverride =
+    typeof typedValue.attackBonusOverride === "number" &&
+    Number.isFinite(typedValue.attackBonusOverride)
+      ? Math.max(-20, Math.min(50, Math.trunc(typedValue.attackBonusOverride)))
+      : undefined;
+  const damageDieOverride =
+    typeof typedValue.damageDieOverride === "number" &&
+    Number.isFinite(typedValue.damageDieOverride)
+      ? Math.max(2, Math.min(100, Math.trunc(typedValue.damageDieOverride)))
+      : undefined;
+  const damageBonusOverride =
+    typeof typedValue.damageBonusOverride === "number" &&
+    Number.isFinite(typedValue.damageBonusOverride)
+      ? Math.max(-20, Math.min(100, Math.trunc(typedValue.damageBonusOverride)))
+      : undefined;
+  const moveTilesOverride =
+    typeof typedValue.moveTilesOverride === "number" &&
+    Number.isFinite(typedValue.moveTilesOverride)
+      ? Math.max(1, Math.min(50, Math.trunc(typedValue.moveTilesOverride)))
+      : undefined;
+  const hasRangedCapability =
+    typeof typedValue.hasRangedCapability === "boolean"
+      ? typedValue.hasRangedCapability
+      : undefined;
+  const gridX =
+    typeof typedValue.gridX === "number" && Number.isFinite(typedValue.gridX)
+      ? Math.max(0, Math.trunc(typedValue.gridX))
+      : undefined;
+  const gridY =
+    typeof typedValue.gridY === "number" && Number.isFinite(typedValue.gridY)
+      ? Math.max(0, Math.trunc(typedValue.gridY))
+      : undefined;
+  const tokenFootprintCols =
+    typeof typedValue.tokenFootprintCols === "number" &&
+    Number.isFinite(typedValue.tokenFootprintCols)
+      ? Math.max(1, Math.min(6, Math.trunc(typedValue.tokenFootprintCols)))
+      : undefined;
+  const tokenFootprintRows =
+    typeof typedValue.tokenFootprintRows === "number" &&
+    Number.isFinite(typedValue.tokenFootprintRows)
+      ? Math.max(1, Math.min(6, Math.trunc(typedValue.tokenFootprintRows)))
+      : undefined;
   const summary =
     typeof typedValue.summary === "string" && typedValue.summary.trim()
       ? typedValue.summary.trim()
+      : undefined;
+  const tokenLibraryId =
+    typeof typedValue.tokenLibraryId === "string" && typedValue.tokenLibraryId.trim()
+      ? typedValue.tokenLibraryId.trim()
+      : undefined;
+  const tokenImageDataUrl =
+    typeof typedValue.tokenImageDataUrl === "string" &&
+    typedValue.tokenImageDataUrl.startsWith("data:image/")
+      ? typedValue.tokenImageDataUrl
+      : undefined;
+  const tokenLabel =
+    typeof typedValue.tokenLabel === "string" && typedValue.tokenLabel.trim()
+      ? typedValue.tokenLabel.trim()
       : undefined;
   const hp =
     typeof typedValue.hp === "string" && typedValue.hp.trim()
@@ -85,6 +182,22 @@ function normalizeCombatRosterEntry(value: unknown): CombatRosterEntry | null {
 
   return {
     id,
+    creatureSlug,
+    creatureSize,
+    armorClass,
+    hpMax,
+    attackBonusOverride,
+    damageDieOverride,
+    damageBonusOverride,
+    moveTilesOverride,
+    hasRangedCapability,
+    gridX,
+    gridY,
+    tokenFootprintCols,
+    tokenFootprintRows,
+    tokenLibraryId,
+    tokenImageDataUrl,
+    tokenLabel,
     name,
     type,
     initiative,
@@ -250,12 +363,70 @@ export function normalizeCombatState(value: unknown): CombatState {
     active: index === chosenActiveIndex,
   }));
   turnIndex = chosenActiveIndex;
+  const mapTemplateId =
+    typeof typedValue.mapTemplateId === "string" && typedValue.mapTemplateId.trim()
+      ? typedValue.mapTemplateId.trim()
+      : undefined;
+  const mapTemplateLocationKey =
+    typeof typedValue.mapTemplateLocationKey === "string" &&
+    typedValue.mapTemplateLocationKey.trim()
+      ? typedValue.mapTemplateLocationKey.trim()
+      : undefined;
+  const encounterTotalXp =
+    typeof typedValue.encounterTotalXp === "number" &&
+    Number.isFinite(typedValue.encounterTotalXp)
+      ? Math.max(0, Math.trunc(typedValue.encounterTotalXp))
+      : undefined;
+  const encounterAdjustedXp =
+    typeof typedValue.encounterAdjustedXp === "number" &&
+    Number.isFinite(typedValue.encounterAdjustedXp)
+      ? Math.max(0, Math.trunc(typedValue.encounterAdjustedXp))
+      : undefined;
+  const encounterDifficulty =
+    typeof typedValue.encounterDifficulty === "string" && typedValue.encounterDifficulty.trim()
+      ? typedValue.encounterDifficulty.trim()
+      : undefined;
+  const encounterEnemyTotal =
+    typeof typedValue.encounterEnemyTotal === "number" &&
+    Number.isFinite(typedValue.encounterEnemyTotal)
+      ? Math.max(0, Math.trunc(typedValue.encounterEnemyTotal))
+      : undefined;
+  const encounterThresholdEasy =
+    typeof typedValue.encounterThresholdEasy === "number" &&
+    Number.isFinite(typedValue.encounterThresholdEasy)
+      ? Math.max(0, Math.trunc(typedValue.encounterThresholdEasy))
+      : undefined;
+  const encounterThresholdMedium =
+    typeof typedValue.encounterThresholdMedium === "number" &&
+    Number.isFinite(typedValue.encounterThresholdMedium)
+      ? Math.max(0, Math.trunc(typedValue.encounterThresholdMedium))
+      : undefined;
+  const encounterThresholdHard =
+    typeof typedValue.encounterThresholdHard === "number" &&
+    Number.isFinite(typedValue.encounterThresholdHard)
+      ? Math.max(0, Math.trunc(typedValue.encounterThresholdHard))
+      : undefined;
+  const encounterThresholdDeadly =
+    typeof typedValue.encounterThresholdDeadly === "number" &&
+    Number.isFinite(typedValue.encounterThresholdDeadly)
+      ? Math.max(0, Math.trunc(typedValue.encounterThresholdDeadly))
+      : undefined;
 
   return {
     combatActive,
     round,
     turnIndex,
     roster: normalizedRoster,
+    mapTemplateId,
+    mapTemplateLocationKey,
+    encounterTotalXp,
+    encounterAdjustedXp,
+    encounterDifficulty,
+    encounterEnemyTotal,
+    encounterThresholdEasy,
+    encounterThresholdMedium,
+    encounterThresholdHard,
+    encounterThresholdDeadly,
   };
 }
 

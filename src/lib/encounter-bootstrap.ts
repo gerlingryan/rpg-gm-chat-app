@@ -1,9 +1,11 @@
 export type EncounterDifficultyMode = "cinematic" | "standard" | "deadly";
 export type EncounterVariance = "low" | "medium" | "high";
 export type EncounterTemplateTier = "minion" | "standard" | "elite" | "boss";
+export type EncounterIntent = "easy" | "standard" | "hard";
 
 export type EncounterCombatGenerationConfig = {
   difficultyMode: EncounterDifficultyMode;
+  encounterIntent: EncounterIntent;
   encounterVariance: EncounterVariance;
   minOpponents: number;
   maxOpponents: number;
@@ -136,6 +138,17 @@ function normalizeEncounterVariance(
 ): EncounterVariance {
   const text = asString(value).toLowerCase();
   if (text === "low" || text === "medium" || text === "high") {
+    return text;
+  }
+  return fallback;
+}
+
+function normalizeEncounterIntent(
+  value: unknown,
+  fallback: EncounterIntent,
+): EncounterIntent {
+  const text = asString(value).toLowerCase();
+  if (text === "easy" || text === "standard" || text === "hard") {
     return text;
   }
   return fallback;
@@ -478,6 +491,7 @@ export function buildInitialEncounterBootstrap(params: {
   return {
     combatGeneration: {
       difficultyMode: "standard",
+      encounterIntent: "standard",
       encounterVariance:
         params.tone.toLowerCase().includes("horror") || params.scope.toLowerCase() === "global"
           ? "high"
@@ -630,6 +644,10 @@ export function normalizeEncounterBootstrap(
       difficultyMode: normalizeDifficultyMode(
         combatValue?.difficultyMode,
         fallback.combatGeneration.difficultyMode,
+      ),
+      encounterIntent: normalizeEncounterIntent(
+        combatValue?.encounterIntent,
+        fallback.combatGeneration.encounterIntent,
       ),
       encounterVariance: normalizeEncounterVariance(
         combatValue?.encounterVariance,

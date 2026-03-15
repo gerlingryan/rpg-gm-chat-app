@@ -652,7 +652,7 @@ export function formatCampaignBootstrapForPrompt(bootstrap: CampaignBootstrap) {
 
   return [
     `Seed: ${bootstrap.seed}`,
-    `Encounter mode: ${bootstrap.combat_generation.difficultyMode}/${bootstrap.combat_generation.encounterVariance}`,
+    `Encounter mode: ${bootstrap.combat_generation.difficultyMode}/${bootstrap.combat_generation.encounterVariance} (${bootstrap.combat_generation.encounterIntent})`,
     `World roster templates: ${bootstrap.world_roster.enemyTemplates.length}`,
     `Public goal: ${bootstrap.campaign.party_goal_public || "None"}`,
     `Hidden objective: ${bootstrap.gm_notes.current_objective || "None"}`,

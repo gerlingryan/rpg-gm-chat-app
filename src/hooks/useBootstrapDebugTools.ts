@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type CampaignBootstrap } from "@/lib/campaign-bootstrap";
 
 export type DebugBootstrapState = {
@@ -12,9 +12,19 @@ export function useBootstrapDebugTools(params: {
   onError: (message: string) => void;
 }) {
   const { campaignId, onPublicBootstrapUpdate, onError } = params;
+  const onPublicBootstrapUpdateRef = useRef(onPublicBootstrapUpdate);
+  const onErrorRef = useRef(onError);
   const [debugBootstrapState, setDebugBootstrapState] = useState<DebugBootstrapState>(null);
   const [isLoadingDebugBootstrapState, setIsLoadingDebugBootstrapState] = useState(false);
   const [isApplyingDebugBootstrapAction, setIsApplyingDebugBootstrapAction] = useState(false);
+
+  useEffect(() => {
+    onPublicBootstrapUpdateRef.current = onPublicBootstrapUpdate;
+  }, [onPublicBootstrapUpdate]);
+
+  useEffect(() => {
+    onErrorRef.current = onError;
+  }, [onError]);
 
   const loadDebugBootstrapState = useCallback(async () => {
     if (!campaignId) {
@@ -37,7 +47,7 @@ export function useBootstrapDebugTools(params: {
           typeof data.bootstrap.updatedAt === "string" ? data.bootstrap.updatedAt : undefined,
       });
     } catch (debugBootstrapError) {
-      onError(
+      onErrorRef.current(
         debugBootstrapError instanceof Error
           ? debugBootstrapError.message
           : "Unable to load debug bootstrap state.",
@@ -45,7 +55,7 @@ export function useBootstrapDebugTools(params: {
     } finally {
       setIsLoadingDebugBootstrapState(false);
     }
-  }, [campaignId, onError]);
+  }, [campaignId]);
 
   const applyDebugBootstrapAction = useCallback(async (
     payload: Record<string, unknown>,
@@ -54,7 +64,7 @@ export function useBootstrapDebugTools(params: {
     if (!campaignId || isApplyingDebugBootstrapAction) {
       return;
     }
-    onError("");
+    onErrorRef.current("");
     setIsApplyingDebugBootstrapAction(true);
     try {
       const response = await fetch(`/api/campaigns/${campaignId}/bootstrap/debug`, {
@@ -75,15 +85,15 @@ export function useBootstrapDebugTools(params: {
         updatedAt:
           typeof data.bootstrap.updatedAt === "string" ? data.bootstrap.updatedAt : undefined,
       });
-      onPublicBootstrapUpdate(data.bootstrap.publicView);
+      onPublicBootstrapUpdateRef.current(data.bootstrap.publicView);
     } catch (debugBootstrapError) {
-      onError(
+      onErrorRef.current(
         debugBootstrapError instanceof Error ? debugBootstrapError.message : fallbackMessage,
       );
     } finally {
       setIsApplyingDebugBootstrapAction(false);
     }
-  }, [campaignId, isApplyingDebugBootstrapAction, onError, onPublicBootstrapUpdate]);
+  }, [campaignId, isApplyingDebugBootstrapAction]);
 
   return {
     debugBootstrapState,
@@ -93,4 +103,3 @@ export function useBootstrapDebugTools(params: {
     applyDebugBootstrapAction,
   };
 }
-
